@@ -1,7 +1,7 @@
 [project]
 name = "data-analyst-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "pandas",
   "matplotlib",
@@ -24,7 +24,7 @@ select = ["E", "F", "I"]
 
 [build-system]
 requires = ["setuptools"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
