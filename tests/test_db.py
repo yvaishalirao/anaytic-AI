@@ -1,8 +1,9 @@
 import sqlite3
+import uuid
 
 import pytest
 
-from agent.db import init_db
+from agent.db import init_db, new_session_id
 
 
 def test_wal_mode(tmp_path):
@@ -47,4 +48,39 @@ def test_log_step_type_enum(tmp_path):
             "INSERT INTO reasoning_log(session_id, job_id, step_type, content, seq) VALUES (?, ?, ?, ?, ?)",
             ("test-session", "job-1", "OTHER", "test content", 1),
         )
+
+
+def test_session_id_uniqueness(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    ids = set()
+    for _ in range(10_000):
+        session_id = new_session_id(conn)
+        assert len(session_id) == 36
+        assert session_id.count("-") == 4
+        ids.add(session_id)
+    assert len(ids) == 10_000
+
+
+def test_session_id_format(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    assert len(session_id) == 36
+    assert session_id.count("-") == 4
+
+
+def test_session_collision_raises(tmp_path, monkeypatch):
+    conn = init_db(str(tmp_path / "agent.db"))
+    collision_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO jobs(id, session_id, job_type) VALUES (?, ?, ?)",
+        ("job-collision", collision_id, "ANALYSIS"),
+    )
+
+    class DummyUUID:
+        def __str__(self):
+            return collision_id
+
+    monkeypatch.setattr("uuid.uuid4", lambda: DummyUUID())
+    with pytest.raises(RuntimeError):
+        new_session_id(conn)
 

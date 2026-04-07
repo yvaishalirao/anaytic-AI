@@ -8,6 +8,21 @@ def get_conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def new_session_id(conn: sqlite3.Connection) -> str:
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE session_id=? LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if row is not None:
+        raise RuntimeError(
+            f"Session ID collision (should never happen): {session_id}"
+        )
+    return session_id
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = get_conn(db_path)
     with conn:
