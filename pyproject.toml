@@ -1,0 +1,31 @@
+[project]
+name = "data-analyst-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas",
+  "matplotlib",
+  "seaborn",
+  "openai",
+  "streamlit",
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
