@@ -76,6 +76,20 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_log_session ON reasoning_log(session_id)"
         )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_log_no_update
+            BEFORE UPDATE ON reasoning_log
+            BEGIN SELECT RAISE(ABORT, 'reasoning_log is append-only'); END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_log_no_delete
+            BEFORE DELETE ON reasoning_log
+            BEGIN SELECT RAISE(ABORT, 'reasoning_log is append-only'); END
+            """
+        )
     return conn
 
 
@@ -165,3 +179,97 @@ def detect_stalled_jobs(conn: sqlite3.Connection, stall_threshold_s: int = 300) 
         count += 1
 
     return count
+
+
+def write_result(
+    conn: sqlite3.Connection,
+    session_id: str,
+    job_id: str,
+    analysis_type: str,
+    status: str,
+    output=None,
+    chart_path=None,
+):
+    valid_statuses = {"COMPLETED", "FAILED", "TIMEOUT"}
+    if status not in valid_statuses:
+        raise ValueError(f"Invalid status: {status}. Must be one of {valid_statuses}")
+
+    conn.execute(
+        """
+        INSERT INTO results(session_id, job_id, analysis_type, status, output, chart_path)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, job_id, analysis_type, status, output, chart_path),
+    )
+
+
+def write_log_entry(
+    conn: sqlite3.Connection,
+    session_id: str,
+    job_id: str,
+    step_type: str,
+    content: str,
+    seq: int,
+):
+    valid_step_types = {"PLAN", "ACTION", "OBSERVE"}
+    if step_type not in valid_step_types:
+        raise ValueError(f"Invalid step_type: {step_type}. Must be one of {valid_step_types}")
+
+    conn.execute(
+        """
+        INSERT INTO reasoning_log(session_id, job_id, step_type, content, seq)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (session_id, job_id, step_type, content, seq),
+    )
+
+
+def get_session_results(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, session_id, job_id, analysis_type, status, output, chart_path, created_at
+        FROM results
+        WHERE session_id = ?
+        ORDER BY created_at
+        """,
+        (session_id,),
+    ).fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "session_id": row[1],
+            "job_id": row[2],
+            "analysis_type": row[3],
+            "status": row[4],
+            "output": row[5],
+            "chart_path": row[6],
+            "created_at": row[7],
+        }
+        for row in rows
+    ]
+
+
+def get_session_log(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, session_id, job_id, step_type, content, seq, created_at
+        FROM reasoning_log
+        WHERE session_id = ?
+        ORDER BY seq ASC
+        """,
+        (session_id,),
+    ).fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "session_id": row[1],
+            "job_id": row[2],
+            "step_type": row[3],
+            "content": row[4],
+            "seq": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]

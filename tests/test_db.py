@@ -3,7 +3,19 @@ import uuid
 
 import pytest
 
-from agent.db import init_db, new_session_id, enqueue_job, claim_next_job, complete_job, fail_job, detect_stalled_jobs
+from agent.db import (
+    init_db,
+    new_session_id,
+    enqueue_job,
+    claim_next_job,
+    complete_job,
+    fail_job,
+    detect_stalled_jobs,
+    write_result,
+    write_log_entry,
+    get_session_results,
+    get_session_log,
+)
 
 
 def test_wal_mode(tmp_path):
@@ -178,4 +190,75 @@ def test_fail_job_reason(tmp_path):
     payload = json.loads(row[1])
     assert payload["failure_reason"] == "test failure reason"
     assert payload["original"] == "data"
+
+
+def test_log_no_update(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    # Insert a log entry
+    write_log_entry(conn, session_id, job_id, "PLAN", "test content", 1)
+
+    # Try to update - should raise IntegrityError
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE reasoning_log SET content='modified' WHERE id=1")
+
+
+def test_log_no_delete(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    # Insert a log entry
+    write_log_entry(conn, session_id, job_id, "PLAN", "test content", 1)
+
+    # Try to delete - should raise IntegrityError
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM reasoning_log WHERE id=1")
+
+
+def test_log_ordering(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    # Insert log entries out of order
+    write_log_entry(conn, session_id, job_id, "PLAN", "step 3", 3)
+    write_log_entry(conn, session_id, job_id, "ACTION", "step 1", 1)
+    write_log_entry(conn, session_id, job_id, "OBSERVE", "step 2", 2)
+
+    # Get log should return in seq order
+    log_entries = get_session_log(conn, session_id)
+    assert len(log_entries) == 3
+    assert log_entries[0]["seq"] == 1
+    assert log_entries[1]["seq"] == 2
+    assert log_entries[2]["seq"] == 3
+    assert log_entries[0]["content"] == "step 1"
+    assert log_entries[1]["content"] == "step 2"
+    assert log_entries[2]["content"] == "step 3"
+
+
+def test_session_isolation_results(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+
+    # Create two sessions
+    session_a = new_session_id(conn)
+    session_b = new_session_id(conn)
+
+    job_a = enqueue_job(conn, session_a, "ANALYSIS", {})
+    job_b = enqueue_job(conn, session_b, "ANALYSIS", {})
+
+    # Write results for session A
+    write_result(conn, session_a, job_a, "summary", "COMPLETED", "output A", "chart.png")
+
+    # Session B should see no results
+    results_b = get_session_results(conn, session_b)
+    assert len(results_b) == 0
+
+    # Session A should see its result
+    results_a = get_session_results(conn, session_a)
+    assert len(results_a) == 1
+    assert results_a[0]["session_id"] == session_a
+    assert results_a[0]["output"] == "output A"
 
