@@ -16,6 +16,7 @@ from agent.db import (
     get_session_results,
     get_session_log,
 )
+from agent.memory import SessionMemory
 
 
 def test_wal_mode(tmp_path):
@@ -261,4 +262,79 @@ def test_session_isolation_results(tmp_path):
     assert len(results_a) == 1
     assert results_a[0]["session_id"] == session_a
     assert results_a[0]["output"] == "output A"
+
+
+def test_memory_failed_not_done(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    memory = SessionMemory(conn, session_id)
+    memory.set_job_id(job_id)
+
+    # Record a failed analysis
+    memory.record_failed("summary", "error message")
+
+    # Should not be considered done
+    assert not memory.is_done("summary")
+
+
+def test_memory_timeout_not_done(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    memory = SessionMemory(conn, session_id)
+    memory.set_job_id(job_id)
+
+    # Record a timed-out analysis
+    memory.record_timeout("summary")
+
+    # Should not be considered done
+    assert not memory.is_done("summary")
+
+
+def test_memory_completed_done(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    memory = SessionMemory(conn, session_id)
+    memory.set_job_id(job_id)
+
+    # Record a completed analysis
+    memory.record_completed("summary", "analysis output", "chart.png")
+
+    # Should be considered done
+    assert memory.is_done("summary")
+
+
+def test_memory_all_attempted(tmp_path):
+    conn = init_db(str(tmp_path / "agent.db"))
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+
+    memory = SessionMemory(conn, session_id)
+    memory.set_job_id(job_id)
+
+    # Record different types of results
+    memory.record_failed("summary", "error")
+    memory.record_timeout("trends")
+    memory.record_completed("anomalies", "output", None)
+
+    # Get all attempted
+    attempted = memory.get_all_attempted()
+    assert len(attempted) == 3
+
+    # Check statuses
+    statuses = {result["status"] for result in attempted}
+    assert "FAILED" in statuses
+    assert "TIMEOUT" in statuses
+    assert "COMPLETED" in statuses
+
+    # Check analysis types
+    types = {result["analysis_type"] for result in attempted}
+    assert "summary" in types
+    assert "trends" in types
+    assert "anomalies" in types
 
