@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from agent.db import init_db, get_conn, get_session_log
+from agent.loop import ReasoningLogger
 from agent.planner import (
     MAX_HISTORY_STEPS,
     build_planner_prompt,
@@ -352,3 +354,101 @@ def test_history_compressed(mock_make_client):
     old_history = [{"role": "user", "content": f"msg {i}"} for i in range(8)]
     new_history = summarise_history(old_history, api_key="key")
     assert len(new_history) < len(old_history)
+
+
+# ---------------------------------------------------------------------------
+# 5.3 — ReasoningLogger
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db_conn(tmp_path):
+    """Fresh in-memory-equivalent DB for each test."""
+    db_path = str(tmp_path / "test.db")
+    conn = init_db(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def test_logger_seq(db_conn):
+    """log() increments seq monotonically (5.3 TC-1)."""
+    logger = ReasoningLogger(db_conn, "sess-001", "job-001")
+
+    assert logger.next_seq() == 1
+    seq1 = logger.log("PLAN", "step 1")
+    assert seq1 == 1
+
+    assert logger.next_seq() == 2
+    seq2 = logger.log("ACTION", "step 2")
+    assert seq2 == 2
+
+    assert logger.next_seq() == 3
+    seq3 = logger.log("OBSERVE", "step 3")
+    assert seq3 == 3
+
+    # Verify the DB entries are in the same order
+    entries = get_session_log(db_conn, "sess-001")
+    assert [e["seq"] for e in entries] == [1, 2, 3]
+
+
+def test_logger_invalid_step_type(db_conn):
+    """Invalid step_type raises ValueError before any DB write (5.3 TC-2)."""
+    logger = ReasoningLogger(db_conn, "sess-001", "job-001")
+
+    with pytest.raises(ValueError):
+        logger.log("INVALID", "some content")
+
+    # No entry should have been written
+    entries = get_session_log(db_conn, "sess-001")
+    assert len(entries) == 0
+
+
+def test_logger_session_isolation(db_conn):
+    """Two loggers for different sessions have independent seq counters (5.3 TC-3)."""
+    logger_a = ReasoningLogger(db_conn, "sess-AAA", "job-AAA")
+    logger_b = ReasoningLogger(db_conn, "sess-BBB", "job-BBB")
+
+    logger_a.log("PLAN", "a step 1")
+    logger_a.log("ACTION", "a step 2")
+
+    logger_b.log("PLAN", "b step 1")
+
+    # Each logger's seq is independent
+    assert logger_a._seq == 2
+    assert logger_b._seq == 1
+
+    # DB entries are also scoped by session
+    entries_a = get_session_log(db_conn, "sess-AAA")
+    entries_b = get_session_log(db_conn, "sess-BBB")
+    assert len(entries_a) == 2
+    assert len(entries_b) == 1
+    # Both sequences start at 1 independently
+    assert entries_a[0]["seq"] == 1
+    assert entries_b[0]["seq"] == 1
+
+
+def test_logger_append_only(db_conn):
+    """DB trigger rejects UPDATE on reasoning_log (5.3 TC-4, I-21).
+
+    The trigger uses RAISE(ABORT,...) which SQLite surfaces as either
+    OperationalError or IntegrityError depending on the Python sqlite3
+    version. We catch the common base class DatabaseError so the test
+    is not fragile across Python versions.
+    """
+    logger = ReasoningLogger(db_conn, "sess-001", "job-001")
+    logger.log("PLAN", "original content")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db_conn.execute(
+            "UPDATE reasoning_log SET content='tampered' WHERE session_id='sess-001'"
+        )
+
+
+def test_logger_convenience_methods(db_conn):
+    """log_plan / log_action / log_observe delegate to log() with correct step_type."""
+    logger = ReasoningLogger(db_conn, "sess-001", "job-001")
+    logger.log_plan("planning")
+    logger.log_action("acting")
+    logger.log_observe("observing")
+
+    entries = get_session_log(db_conn, "sess-001")
+    assert [e["step_type"] for e in entries] == ["PLAN", "ACTION", "OBSERVE"]
