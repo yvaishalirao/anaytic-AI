@@ -1,7 +1,7 @@
 """Integration tests — Session 5, tasks 5.5 TC-4 and 5.6."""
 
 import csv
-import json
+import os
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -10,7 +10,6 @@ import pytest
 
 from agent.db import (
     enqueue_job,
-    get_conn,
     get_session_log,
     get_session_results,
     init_db,
@@ -19,7 +18,6 @@ from agent.db import (
 from agent.memory import SessionMemory
 from agent.profiler import get_df_transfer_payload, profile_csv
 from agent.reporter import validate_session_output
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -261,7 +259,7 @@ def test_polling_stops_on_done(db_conn, sales_csv):
 
 def test_upload_creates_job(db_conn, sales_csv):
     """Uploading a CSV enqueues a PENDING ANALYSIS job in the DB (7.1 TC-3)."""
-    from agent.db import new_session_id, enqueue_job
+    from agent.db import enqueue_job, new_session_id
 
     # Simulate what app.py does on file upload
     session_id = new_session_id(db_conn)
@@ -283,6 +281,357 @@ def test_upload_creates_job(db_conn, sales_csv):
     assert row["status"] == "PENDING"
     assert row["job_type"] == "ANALYSIS"
     assert row["session_id"] == session_id
+
+
+def _run_display_logic(conn, session_id: str, outputs_base: str) -> dict:
+    """Replicate app.py display logic without Streamlit.
+
+    Returns a dict recording which paths were checked with os.path.exists()
+    and whether each existed, mirroring what app.py would render.
+    """
+    results = get_session_results(conn, session_id)
+    chart_paths = [r["chart_path"] for r in results if r.get("chart_path")]
+    report_path = os.path.join(outputs_base, session_id, "report.md")
+
+    checked = {}
+    for path in chart_paths:
+        checked[path] = os.path.exists(path)
+    checked[report_path] = os.path.exists(report_path)
+
+    return {
+        "chart_paths": chart_paths,
+        "report_path": report_path,
+        "checked": checked,
+    }
+
+
+def test_chart_display_missing(db_conn, tmp_path):
+    """Display logic skips charts whose files are gone — no exception raised (7.3 TC-1)."""
+    from agent.db import write_result
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+
+    # Record a chart path that does NOT exist on disk
+    phantom_chart = str(tmp_path / "outputs" / session_id / "ghost.png")
+    write_result(
+        db_conn, session_id, job_id, "histogram", "COMPLETED", "output", phantom_chart
+    )
+
+    info = _run_display_logic(db_conn, session_id, str(tmp_path / "outputs"))
+
+    # os.path.exists must have been called for the chart path
+    assert phantom_chart in info["checked"]
+    # The file does not exist — display logic must not raise
+    assert info["checked"][phantom_chart] is False
+
+
+def test_report_display(db_conn, tmp_path, monkeypatch):
+    """Report Markdown is readable when report.md exists (7.3 TC-2)."""
+    monkeypatch.chdir(tmp_path)
+
+    session_id = new_session_id(db_conn)
+    enqueue_job(db_conn, session_id, "ANALYSIS", {})
+
+    # Create the report file
+    report_dir = tmp_path / "outputs" / session_id
+    report_dir.mkdir(parents=True)
+    report_file = report_dir / "report.md"
+    report_file.write_text(
+        "## Dataset Summary\n\nSome content.\n\n"
+        "## Key Trends\n\nTrends.\n\n"
+        "## Anomalies\n\nAnomalies.\n\n"
+        "## Recommendations\n\nRecs.\n",
+        encoding="utf-8",
+    )
+
+    info = _run_display_logic(db_conn, session_id, str(tmp_path / "outputs"))
+
+    # os.path.exists must have been called for the report
+    assert info["report_path"] in info["checked"]
+    # And the file must exist
+    assert info["checked"][info["report_path"]] is True
+    # Content is readable
+    content = Path(info["report_path"]).read_text(encoding="utf-8")
+    assert "Dataset Summary" in content
+
+
+def test_failed_status_display(db_conn):
+    """A FAILED job can be detected by polling (7.3 TC-3)."""
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+    db_conn.execute("UPDATE jobs SET status='FAILED' WHERE id=?", (job_id,))
+
+    status = _poll_status(db_conn, session_id)
+    assert status == "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# 7.4 — Follow-up Q&A (plan test IDs)
+# ---------------------------------------------------------------------------
+
+def test_followup_dispatch(db_conn):
+    """Enqueuing a follow-up question creates a FOLLOWUP job in the jobs table (7.4 TC-1)."""
+    session_id = new_session_id(db_conn)
+    # Simulate what app.py does when the user submits a follow-up question
+    job_id = enqueue_job(
+        db_conn,
+        session_id,
+        "FOLLOWUP",
+        {"question": "What are the trends?", "session_id": session_id},
+    )
+
+    row = db_conn.execute(
+        "SELECT job_type, status, session_id FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+
+    assert row is not None
+    assert row["job_type"] == "FOLLOWUP"
+    assert row["status"] == "PENDING"
+    assert row["session_id"] == session_id
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_answered(mock_client, db_conn):
+    """FOLLOWUP job processed by agent service writes a result with followup: prefix (7.4 TC-2)."""
+    from agent.agent_service import dispatch_job
+    from agent.db import write_result
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "Sales are increasing steadily."
+
+    session_id = new_session_id(db_conn)
+    analysis_job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+    write_result(
+        db_conn, session_id, analysis_job_id,
+        "histogram_sales", "COMPLETED", "mean=1200", None,
+    )
+
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "Any trends?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    dispatch_job(job, db_conn, api_key="test-key")
+
+    results = get_session_results(db_conn, session_id)
+    followup_results = [r for r in results if r["analysis_type"].startswith("followup:")]
+    assert len(followup_results) >= 1, (
+        f"Expected at least one followup: result, got: {[r['analysis_type'] for r in results]}"
+    )
+    assert followup_results[0]["status"] == "COMPLETED"
+    assert followup_results[0]["output"] == "Sales are increasing steadily."
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_no_code_exec(mock_client, db_conn):
+    """execute_code is never called during a FOLLOWUP dispatch (7.4 TC-3)."""
+    from agent.agent_service import dispatch_job
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "Answer without code."
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "Is there a trend?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    with patch("agent.executor.execute_code") as mock_exec:
+        dispatch_job(job, db_conn, api_key="test-key")
+
+    mock_exec.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 7.4 — Follow-up Q&A (additional coverage)
+# ---------------------------------------------------------------------------
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_job_dispatched_and_answered(mock_client, db_conn):
+    """FOLLOWUP job dispatched by service writes answer with followup: prefix (7.4 TC-1)."""
+    from agent.agent_service import dispatch_job
+    from agent.db import write_result
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "The sales trend is upward."
+
+    session_id = new_session_id(db_conn)
+    # Seed a completed analysis so the context is non-empty
+    analysis_job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+    write_result(
+        db_conn, session_id, analysis_job_id,
+        "histogram_sales", "COMPLETED", "mean=1200, std=150", None,
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='DONE' WHERE id=?", (analysis_job_id,)
+    )
+
+    # Enqueue a FOLLOWUP job
+    followup_job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "What is the sales trend?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (followup_job_id,),
+    )
+    followup_job = dict(db_conn.execute(
+        "SELECT * FROM jobs WHERE id=?", (followup_job_id,)
+    ).fetchone())
+
+    dispatch_job(followup_job, db_conn, api_key="test-key")
+
+    # Job must be DONE
+    row = db_conn.execute(
+        "SELECT status FROM jobs WHERE id=?", (followup_job_id,)
+    ).fetchone()
+    assert row["status"] == "DONE"
+
+    # A result with analysis_type starting with "followup:" must exist
+    results = get_session_results(db_conn, session_id)
+    followup_results = [r for r in results if r["analysis_type"].startswith("followup:")]
+    assert len(followup_results) == 1, (
+        f"Expected 1 followup result, got: {[r['analysis_type'] for r in followup_results]}"
+    )
+    assert "What is the sales trend?" in followup_results[0]["analysis_type"]
+    assert followup_results[0]["output"] == "The sales trend is upward."
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_answer_readable_in_ui(mock_client, db_conn):
+    """Prior Q&A answers written by agent are readable by the UI display logic (7.4 TC-2)."""
+    from agent.db import write_result
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "Sales peaked in Q3."
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+
+    # Simulate agent writing a followup answer
+    write_result(
+        db_conn, session_id, job_id,
+        "followup:How did sales perform?", "COMPLETED", "Sales peaked in Q3.", None,
+    )
+
+    # UI display logic: filter results where analysis_type starts with "followup:"
+    results = get_session_results(db_conn, session_id)
+    followup_results = [r for r in results if r["analysis_type"].startswith("followup:")]
+
+    assert len(followup_results) == 1
+    question = followup_results[0]["analysis_type"].replace("followup:", "", 1)
+    assert question == "How did sales perform?"
+    assert followup_results[0]["output"] == "Sales peaked in Q3."
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_no_findings_context(mock_client, db_conn):
+    """FOLLOWUP job with no prior analyses falls back gracefully (7.4 TC-3)."""
+    from agent.agent_service import dispatch_job
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "No data to answer from."
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "Any trends?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    # Must not raise even with empty session findings
+    dispatch_job(job, db_conn, api_key="test-key")
+
+    row = db_conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert row["status"] == "DONE"
+
+    results = get_session_results(db_conn, session_id)
+    followup_results = [r for r in results if r["analysis_type"].startswith("followup:")]
+    assert len(followup_results) == 1
+    assert followup_results[0]["output"] == "No data to answer from."
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_llm_error_still_writes_result(mock_client, db_conn):
+    """LLM failure in FOLLOWUP still writes a result entry and marks job DONE (7.4 TC-4)."""
+    from agent.agent_service import dispatch_job
+
+    mock_client.return_value.chat.completions.create.side_effect = RuntimeError("API down")
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "What happened?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    dispatch_job(job, db_conn, api_key="test-key")
+
+    row = db_conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert row["status"] == "DONE"
+
+    results = get_session_results(db_conn, session_id)
+    followup_results = [r for r in results if r["analysis_type"].startswith("followup:")]
+    assert len(followup_results) == 1
+    # Output must be non-empty (error message, not silence)
+    assert followup_results[0]["output"]
+    assert "Error" in followup_results[0]["output"] or "error" in followup_results[0]["output"]
+
+
+def test_display_checks_both_chart_and_report(db_conn, tmp_path):
+    """os.path.exists is called for both the chart path and the report path (7.3 spec)."""
+    from agent.db import write_result
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+
+    chart_path = str(tmp_path / "outputs" / session_id / "hist.png")
+    write_result(
+        db_conn, session_id, job_id, "histogram", "COMPLETED", "output", chart_path
+    )
+    report_path = str(tmp_path / "outputs" / session_id / "report.md")
+
+    # Spy on os.path.exists to record every call
+    original_exists = os.path.exists
+    checked_paths: list[str] = []
+
+    def spy_exists(p: str) -> bool:
+        checked_paths.append(str(p))
+        return original_exists(p)
+
+    with patch("os.path.exists", side_effect=spy_exists):
+        _run_display_logic(db_conn, session_id, str(tmp_path / "outputs"))
+
+    assert chart_path in checked_paths, (
+        f"os.path.exists not called for chart: {chart_path}"
+    )
+    assert report_path in checked_paths, (
+        f"os.path.exists not called for report: {report_path}"
+    )
 
 
 def test_validator_catches_missing_section(tmp_path):

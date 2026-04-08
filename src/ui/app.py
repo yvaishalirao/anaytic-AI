@@ -6,7 +6,6 @@ Process boundary (I-07, I-23):
   - The agent service process is never imported here.
 """
 
-import json
 import os
 from pathlib import Path
 

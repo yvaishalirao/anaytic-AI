@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agent.memory import SessionMemory
     from agent.loop import ReasoningLogger
+    from agent.memory import SessionMemory
 
 RUNNER_PATH = Path(__file__).parent / "subprocess_runner.py"
 assert RUNNER_PATH.exists(), f"subprocess runner not found: {RUNNER_PATH}"

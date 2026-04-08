@@ -9,7 +9,6 @@ import pytest
 
 from agent.executor import execute_code, run_analysis_step
 
-
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "src" / "agent" / "subprocess_runner.py"
 
 

@@ -15,16 +15,16 @@ import time
 import openai
 
 from agent.db import (
+    claim_next_job,
     complete_job,
     detect_stalled_jobs,
     get_conn,
     get_session_results,
     init_db,
-    claim_next_job,
     write_result,
 )
 from agent.loop import run_session
-from agent.profiler import load_csv, profile_csv, get_df_transfer_payload
+from agent.profiler import get_df_transfer_payload, load_csv, profile_csv
 
 # I-23: streamlit must never be imported here — verified by test_service_no_streamlit_import
 # I-22: this service runs without the UI process being alive

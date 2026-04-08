@@ -2,24 +2,19 @@
 
 import json
 import sqlite3
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-import os
-import sys
-
-from agent.db import init_db, get_conn, get_session_log, enqueue_job, new_session_id
+from agent.db import enqueue_job, get_session_log, init_db, new_session_id
 from agent.loop import ReasoningLogger, run_session
 from agent.planner import (
-    MAX_HISTORY_STEPS,
     build_planner_prompt,
     call_planner_llm,
     maybe_summarise,
     summarise_history,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -497,8 +492,9 @@ def test_iteration_cap(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
     mock_llm.side_effect = _unique_plan
     mock_report.return_value = None
 
-    from agent.profiler import profile_csv, get_df_transfer_payload
     import pandas as pd
+
+    from agent.profiler import get_df_transfer_payload, profile_csv
     df = pd.read_csv(str(sales_csv))
     profile = profile_csv(str(sales_csv))
     df_payload = get_df_transfer_payload(df, str(sales_csv))
@@ -520,8 +516,9 @@ def test_done_terminates_loop(mock_llm, mock_report, db_conn, tmp_path, sales_cs
     mock_llm.return_value = {"analysis_type": "DONE", "rationale": "no more", "code": ""}
     mock_report.return_value = None
 
-    from agent.profiler import profile_csv, get_df_transfer_payload
     import pandas as pd
+
+    from agent.profiler import get_df_transfer_payload, profile_csv
     df = pd.read_csv(str(sales_csv))
     profile = profile_csv(str(sales_csv))
     df_payload = get_df_transfer_payload(df, str(sales_csv))
@@ -540,9 +537,10 @@ def test_done_terminates_loop(mock_llm, mock_report, db_conn, tmp_path, sales_cs
 @patch("agent.loop.call_planner_llm")
 def test_skip_completed(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
     """Already-completed analysis is skipped with an OBSERVE log entry (5.4 TC-3)."""
-    from agent.db import write_result
-    from agent.profiler import profile_csv, get_df_transfer_payload
     import pandas as pd
+
+    from agent.db import write_result
+    from agent.profiler import get_df_transfer_payload, profile_csv
 
     df = pd.read_csv(str(sales_csv))
     profile = profile_csv(str(sales_csv))
@@ -575,8 +573,9 @@ def test_plan_before_llm(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
     """PLAN log entry is written before the LLM is called each iteration (5.4 TC-4)."""
     plan_seq_at_call: list[int] = []
 
-    from agent.profiler import profile_csv, get_df_transfer_payload
     import pandas as pd
+
+    from agent.profiler import get_df_transfer_payload, profile_csv
 
     df = pd.read_csv(str(sales_csv))
     profile = profile_csv(str(sales_csv))
@@ -608,8 +607,9 @@ def test_report_generated_after_loop(mock_llm, mock_report, db_conn, tmp_path, s
     mock_llm.return_value = {"analysis_type": "DONE", "rationale": "done", "code": ""}
     mock_report.return_value = None
 
-    from agent.profiler import profile_csv, get_df_transfer_payload
     import pandas as pd
+
+    from agent.profiler import get_df_transfer_payload, profile_csv
 
     df = pd.read_csv(str(sales_csv))
     profile = profile_csv(str(sales_csv))
@@ -652,7 +652,8 @@ def test_service_importable():
 
 def test_service_no_ui_import():
     """agent_service must not import from agent.ui (I-23)."""
-    import importlib, inspect
+    import importlib
+    import inspect
     mod = importlib.import_module("agent.agent_service")
     source = inspect.getsource(mod)
     assert "from agent.ui" not in source
@@ -665,8 +666,8 @@ def test_profiler_loop_executor_importable_without_service():
         if "agent_service" in key:
             del sys.modules[key]
 
-    import agent.profiler  # noqa: F401
-    import agent.loop      # noqa: F401
     import agent.executor  # noqa: F401
+    import agent.loop  # noqa: F401
+    import agent.profiler  # noqa: F401
 
     assert "agent.agent_service" not in sys.modules
