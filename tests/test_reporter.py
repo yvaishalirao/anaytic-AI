@@ -1,13 +1,22 @@
 """Tests for Session 6: Report Generator (tasks 6.1–6.4)."""
 
+import os
 import re
+import sqlite3
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from agent.db import enqueue_job, init_db, new_session_id
+from agent.loop import ReasoningLogger
+from agent.memory import SessionMemory
 from agent.reporter import (
     REQUIRED_SECTIONS,
     build_chart_section,
     fill_missing_sections,
+    generate_insights_for_analysis,
+    generate_report,
     validate_chart_paths,
     validate_report_sections,
 )
@@ -233,3 +242,154 @@ def test_build_chart_section_mixed(tmp_path):
     assert "not available" in section.lower()
     # The missing path must NOT appear inside an image tag
     assert f"![chart]({bad})" not in section
+
+
+# ---------------------------------------------------------------------------
+# 6.3 helpers — minimal DB + memory + logger for generate_report tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def report_env(tmp_path):
+    """Fresh DB, session, memory, and ReasoningLogger for generate_report tests."""
+    db_path = str(tmp_path / "test.db")
+    conn = init_db(db_path)
+    conn.row_factory = sqlite3.Row
+    session_id = new_session_id(conn)
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {})
+    conn.execute(
+        "UPDATE jobs SET status='PROCESSING' WHERE id=?", (job_id,)
+    )
+    memory = SessionMemory(conn, session_id)
+    memory.set_job_id(job_id)
+    logger = ReasoningLogger(conn, session_id, job_id)
+    profile = {
+        "file_name": "sales.csv",
+        "row_count": 50,
+        "col_count": 4,
+        "columns": [],
+        "quality_issues": [],
+    }
+    return {
+        "conn": conn,
+        "session_id": session_id,
+        "job_id": job_id,
+        "memory": memory,
+        "logger": logger,
+        "profile": profile,
+        "outputs_base": str(tmp_path / "outputs"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6.3 — generate_insights_for_analysis
+# ---------------------------------------------------------------------------
+
+@patch("agent.reporter._make_client")
+def test_generate_insights_returns_string(mock_client):
+    """generate_insights_for_analysis returns the LLM response string."""
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "Sales show an upward trend throughout 2023."
+
+    result = generate_insights_for_analysis("histogram_sales", "count 50", api_key="k")
+
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+@patch("agent.reporter._make_client")
+def test_generate_insights_fallback_on_error(mock_client):
+    """generate_insights_for_analysis returns a fallback string on LLM error."""
+    mock_client.return_value.chat.completions.create.side_effect = RuntimeError("oops")
+
+    result = generate_insights_for_analysis("bad_analysis", "output", api_key="k")
+
+    assert isinstance(result, str)
+    assert len(result) > 0  # never raises, never returns empty
+
+
+# ---------------------------------------------------------------------------
+# 6.3 — generate_report
+# ---------------------------------------------------------------------------
+
+@patch("agent.reporter.generate_insights_for_analysis")
+def test_report_written(mock_insights, report_env):
+    """generate_report writes a file at outputs/{session_id}/report.md (6.3 TC-1)."""
+    mock_insights.return_value = "Insight text."
+    env = report_env
+
+    path = generate_report(
+        env["session_id"], env["memory"], env["profile"],
+        env["conn"], env["logger"], api_key="test",
+        outputs_base=env["outputs_base"],
+    )
+
+    assert Path(path).exists()
+    assert path == Path(env["outputs_base"]) / env["session_id"] / "report.md"
+
+
+@patch("agent.reporter.generate_insights_for_analysis")
+def test_report_no_overwrite(mock_insights, report_env):
+    """Calling generate_report twice raises FileExistsError (6.3 TC-2, I-19)."""
+    mock_insights.return_value = "Insight."
+    env = report_env
+
+    generate_report(
+        env["session_id"], env["memory"], env["profile"],
+        env["conn"], env["logger"], api_key="test",
+        outputs_base=env["outputs_base"],
+    )
+
+    with pytest.raises(FileExistsError):
+        generate_report(
+            env["session_id"], env["memory"], env["profile"],
+            env["conn"], env["logger"], api_key="test",
+            outputs_base=env["outputs_base"],
+        )
+
+
+@patch("agent.reporter.generate_insights_for_analysis")
+def test_report_all_sections(mock_insights, report_env):
+    """Written report contains all 4 required section headers (6.3 TC-3, I-17)."""
+    mock_insights.return_value = "Insight text."
+    env = report_env
+
+    path = generate_report(
+        env["session_id"], env["memory"], env["profile"],
+        env["conn"], env["logger"], api_key="test",
+        outputs_base=env["outputs_base"],
+    )
+
+    content = Path(path).read_text(encoding="utf-8")
+    missing = validate_report_sections(content)
+    assert missing == [], f"Report is missing sections: {missing}"
+
+
+@patch("agent.reporter.generate_insights_for_analysis")
+def test_no_broken_refs(mock_insights, report_env, tmp_path):
+    """Every ![...](path) in the written report resolves to an existing file (6.3 TC-4, I-18)."""
+    mock_insights.return_value = "Insight."
+    env = report_env
+
+    # Pre-create a real chart file and record it in memory
+    chart_dir = Path(env["outputs_base"]) / env["session_id"]
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    real_chart = chart_dir / "hist.png"
+    real_chart.write_bytes(b"PNG")
+
+    from agent.db import write_result
+    write_result(
+        env["conn"], env["session_id"], env["job_id"],
+        "histogram_sales", "COMPLETED", "some output", str(real_chart),
+    )
+
+    path = generate_report(
+        env["session_id"], env["memory"], env["profile"],
+        env["conn"], env["logger"], api_key="test",
+        outputs_base=env["outputs_base"],
+    )
+
+    content = Path(path).read_text(encoding="utf-8")
+    image_refs = re.findall(r"!\[.*?\]\((.*?)\)", content)
+    for ref in image_refs:
+        assert os.path.exists(ref), f"Broken image reference in report: {ref!r}"

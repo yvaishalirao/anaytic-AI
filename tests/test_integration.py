@@ -18,6 +18,7 @@ from agent.db import (
 )
 from agent.memory import SessionMemory
 from agent.profiler import get_df_transfer_payload, profile_csv
+from agent.reporter import validate_session_output
 
 
 # ---------------------------------------------------------------------------
@@ -180,3 +181,112 @@ def test_full_session_mocked_llm(mock_llm, db_conn, sales_csv, monkeypatch, tmp_
     # --- 7. report file exists ---
     report_path = tmp_path / "outputs" / session_id / "report.md"
     assert report_path.exists(), f"Report not found at {report_path}"
+
+    # --- 8. structural validator passes (6.4 TC-1, I-24) ---
+    result = validate_session_output(
+        session_id,
+        outputs_base=str(tmp_path / "outputs"),
+        conn=db_conn,
+    )
+    assert result["valid"] is True, f"validate_session_output failed: {result['errors']}"
+
+
+# ---------------------------------------------------------------------------
+# 6.4 — validate_session_output unit tests
+# ---------------------------------------------------------------------------
+
+def test_validator_catches_missing_section(tmp_path):
+    """Partial report without Anomalies section → valid=False, errors mention Anomalies (6.4 TC-2)."""
+    session_id = "test-session-validator-001"
+    session_dir = tmp_path / "outputs" / session_id
+    session_dir.mkdir(parents=True)
+
+    # Write a report that is missing ## Anomalies
+    (session_dir / "report.md").write_text(
+        "## Dataset Summary\n\nSome summary.\n\n"
+        "## Key Trends\n\nSome trends.\n\n"
+        "## Recommendations\n\nSome recs.\n",
+        encoding="utf-8",
+    )
+    # Put a dummy chart so check 4 passes
+    (session_dir / "hist.png").write_bytes(b"PNG")
+
+    result = validate_session_output(session_id, outputs_base=str(tmp_path / "outputs"))
+
+    assert result["valid"] is False
+    assert any("Anomalies" in e for e in result["errors"]), (
+        f"Expected an error mentioning 'Anomalies', got: {result['errors']}"
+    )
+
+
+def test_validator_catches_broken_ref(tmp_path):
+    """Report with a broken ![...](path) reference → valid=False (6.4 TC-3)."""
+    session_id = "test-session-validator-002"
+    session_dir = tmp_path / "outputs" / session_id
+    session_dir.mkdir(parents=True)
+
+    broken_path = str(session_dir / "missing_chart.png")  # file does NOT exist
+    (session_dir / "report.md").write_text(
+        f"## Dataset Summary\n\nSummary.\n\n"
+        f"## Key Trends\n\nTrends.\n\n"
+        f"## Anomalies\n\nAnomalies.\n\n"
+        f"## Recommendations\n\nRecs.\n\n"
+        f"![chart]({broken_path})\n",
+        encoding="utf-8",
+    )
+    (session_dir / "real.png").write_bytes(b"PNG")  # chart count satisfied
+
+    result = validate_session_output(session_id, outputs_base=str(tmp_path / "outputs"))
+
+    assert result["valid"] is False
+    assert any("Broken image" in e or "broken" in e.lower() for e in result["errors"]), (
+        f"Expected broken-ref error, got: {result['errors']}"
+    )
+
+
+def test_validator_catches_empty_body(tmp_path):
+    """Report with an empty section body → valid=False (6.4 TC-4)."""
+    session_id = "test-session-validator-003"
+    session_dir = tmp_path / "outputs" / session_id
+    session_dir.mkdir(parents=True)
+
+    # Anomalies section exists but has no body text
+    (session_dir / "report.md").write_text(
+        "## Dataset Summary\n\nSummary.\n\n"
+        "## Key Trends\n\nTrends.\n\n"
+        "## Anomalies\n\n"          # header only — body is empty
+        "## Recommendations\n\nRecs.\n",
+        encoding="utf-8",
+    )
+    (session_dir / "hist.png").write_bytes(b"PNG")
+
+    result = validate_session_output(session_id, outputs_base=str(tmp_path / "outputs"))
+
+    assert result["valid"] is False
+    assert any("empty" in e.lower() for e in result["errors"]), (
+        f"Expected empty-body error, got: {result['errors']}"
+    )
+
+
+def test_validator_passes_complete_session(tmp_path):
+    """A fully valid report + chart → valid=True, errors=[] (6.4 TC-1 standalone)."""
+    session_id = "test-session-validator-004"
+    session_dir = tmp_path / "outputs" / session_id
+    session_dir.mkdir(parents=True)
+
+    chart = session_dir / "hist.png"
+    chart.write_bytes(b"PNG")
+
+    (session_dir / "report.md").write_text(
+        f"## Dataset Summary\n\nSummary text.\n\n"
+        f"## Key Trends\n\nTrend text.\n\n"
+        f"## Anomalies\n\nAnomaly text.\n\n"
+        f"## Recommendations\n\nRecommendations text.\n\n"
+        f"![chart]({chart})\n",
+        encoding="utf-8",
+    )
+
+    result = validate_session_output(session_id, outputs_base=str(tmp_path / "outputs"))
+
+    assert result["valid"] is True
+    assert result["errors"] == []
