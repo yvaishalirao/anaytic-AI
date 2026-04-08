@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import os
+import sys
 
 from agent.db import init_db, get_conn, get_session_log, enqueue_job, new_session_id
 from agent.loop import ReasoningLogger, run_session
@@ -621,3 +622,51 @@ def test_report_generated_after_loop(mock_llm, mock_report, db_conn, tmp_path, s
     run_session(job, db_conn, profile, df_payload, api_key="test")
 
     mock_report.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 5.5 — agent_service import boundary tests
+# ---------------------------------------------------------------------------
+
+def test_service_no_streamlit_import():
+    """Importing agent_service must not pull streamlit into sys.modules (I-23, 5.5 TC-2)."""
+    # Remove any cached import so we get a clean load
+    for key in list(sys.modules.keys()):
+        if "agent_service" in key:
+            del sys.modules[key]
+
+    import agent.agent_service  # noqa: F401 — import is the test
+
+    assert "streamlit" not in sys.modules, (
+        "agent_service imported streamlit, violating I-23"
+    )
+
+
+def test_service_importable():
+    """agent_service imports without error (5.5 TC-1)."""
+    import importlib
+    mod = importlib.import_module("agent.agent_service")
+    assert hasattr(mod, "run_service")
+    assert hasattr(mod, "dispatch_job")
+
+
+def test_service_no_ui_import():
+    """agent_service must not import from agent.ui (I-23)."""
+    import importlib, inspect
+    mod = importlib.import_module("agent.agent_service")
+    source = inspect.getsource(mod)
+    assert "from agent.ui" not in source
+    assert "import agent.ui" not in source
+
+
+def test_profiler_loop_executor_importable_without_service():
+    """Importing profiler/loop/executor must not pull in agent_service (I-23, 5.5 TC-3)."""
+    for key in list(sys.modules.keys()):
+        if "agent_service" in key:
+            del sys.modules[key]
+
+    import agent.profiler  # noqa: F401
+    import agent.loop      # noqa: F401
+    import agent.executor  # noqa: F401
+
+    assert "agent.agent_service" not in sys.modules
