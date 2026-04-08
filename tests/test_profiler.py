@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from agent.profiler import load_csv, infer_column_types
+from agent.profiler import compute_summary_stats, detect_missing, infer_column_types, load_csv
 
 
 def test_infer_datetime(sales_csv):
@@ -74,3 +74,58 @@ def test_load_csv_no_columns(tmp_path):
 
     with pytest.raises(ValueError, match="0 columns"):
         load_csv(str(csv_path))
+
+
+def test_numeric_stats(sales_csv):
+    """Test that numeric columns get proper summary statistics."""
+    df = pd.read_csv(sales_csv)
+    col_types = infer_column_types(df)
+    stats = compute_summary_stats(df, col_types)
+
+    assert "sales" in stats
+    sales_stats = stats["sales"]
+    assert "min" in sales_stats
+    assert "max" in sales_stats
+    assert "mean" in sales_stats
+    assert "std" in sales_stats
+
+    # All should be floats
+    assert isinstance(sales_stats["min"], float)
+    assert isinstance(sales_stats["max"], float)
+    assert isinstance(sales_stats["mean"], float)
+    assert isinstance(sales_stats["std"], float)
+
+
+def test_categorical_stats(sales_csv):
+    """Test that categorical columns get cardinality and top values."""
+    df = pd.read_csv(sales_csv)
+    col_types = infer_column_types(df)
+    stats = compute_summary_stats(df, col_types)
+
+    assert "region" in stats
+    region_stats = stats["region"]
+    assert "cardinality" in region_stats
+    assert "top_values" in region_stats
+
+    assert region_stats["cardinality"] == 4  # North, South, East, West
+    assert isinstance(region_stats["top_values"], list)
+    assert len(region_stats["top_values"]) <= 5
+
+
+def test_missing_detection(sales_csv):
+    """Test that missing values are detected in the returned column."""
+    df = pd.read_csv(sales_csv)
+    missing = detect_missing(df)
+
+    # The 'returned' column should have some missing values
+    assert "returned" in missing
+    assert missing["returned"] > 0
+    assert missing["returned"] < 50  # Should be around 10-20%
+
+
+def test_no_missing(wide_csv):
+    """Test that clean CSV returns empty missing dict."""
+    df = pd.read_csv(wide_csv)
+    missing = detect_missing(df)
+
+    assert missing == {}

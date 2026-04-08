@@ -1,5 +1,6 @@
 import os
 import warnings
+
 import pandas as pd
 
 
@@ -94,5 +95,85 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
 
         # Fallback for any other dtypes
         result[col] = "categorical"
+
+    return result
+
+
+def compute_summary_stats(df: pd.DataFrame, col_types: dict[str, str]) -> dict:
+    """Compute summary statistics for each column based on its type.
+
+    Args:
+        df: DataFrame to analyze
+        col_types: Dict mapping column names to type labels
+
+    Returns:
+        Dict mapping column names to their statistics
+    """
+    result = {}
+
+    for col, col_type in col_types.items():
+        if col not in df.columns:
+            continue
+
+        series = df[col]
+
+        if col_type == "numeric":
+            # Numeric statistics
+            stats = {
+                "min": round(float(series.min()), 4),
+                "max": round(float(series.max()), 4),
+                "mean": round(float(series.mean()), 4),
+                "std": round(float(series.std()), 4),
+            }
+            result[col] = stats
+
+        elif col_type == "categorical":
+            # Categorical statistics
+            value_counts = series.value_counts()
+            top_values = value_counts.head(5).index.tolist()
+            stats = {
+                "cardinality": int(series.nunique()),
+                "top_values": [str(v) for v in top_values],
+            }
+            result[col] = stats
+
+        elif col_type == "datetime":
+            # Datetime statistics - ensure it's parsed as datetime
+            try:
+                dt_series = pd.to_datetime(series, errors="coerce")
+                min_date = dt_series.min()
+                max_date = dt_series.max()
+                stats = {
+                    "min_date": min_date.isoformat() if pd.notna(min_date) else None,
+                    "max_date": max_date.isoformat() if pd.notna(max_date) else None,
+                }
+                result[col] = stats
+            except (ValueError, TypeError):
+                # If datetime parsing fails, skip this column
+                pass
+
+        # Skip boolean and other types for now
+
+    return result
+
+
+def detect_missing(df: pd.DataFrame) -> dict[str, float]:
+    """Detect missing values in DataFrame columns.
+
+    Args:
+        df: DataFrame to analyze
+
+    Returns:
+        Dict mapping column names to missing percentage (0.0-100.0)
+        Only includes columns with missing_pct > 0
+    """
+    result = {}
+    total_rows = len(df)
+
+    for col in df.columns:
+        missing_count = df[col].isna().sum()
+        if missing_count > 0:
+            missing_pct = (missing_count / total_rows) * 100.0
+            result[col] = round(missing_pct, 2)
 
     return result

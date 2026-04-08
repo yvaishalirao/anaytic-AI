@@ -4,17 +4,17 @@ import uuid
 import pytest
 
 from agent.db import (
-    init_db,
-    new_session_id,
-    enqueue_job,
     claim_next_job,
     complete_job,
-    fail_job,
     detect_stalled_jobs,
-    write_result,
-    write_log_entry,
-    get_session_results,
+    enqueue_job,
+    fail_job,
     get_session_log,
+    get_session_results,
+    init_db,
+    new_session_id,
+    write_log_entry,
+    write_result,
 )
 from agent.memory import SessionMemory
 
@@ -58,7 +58,8 @@ def test_log_step_type_enum(tmp_path):
     conn = init_db(str(tmp_path / "agent.db"))
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO reasoning_log(session_id, job_id, step_type, content, seq) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO reasoning_log(session_id, job_id, step_type, content, seq) "
+            "VALUES (?, ?, ?, ?, ?)",
             ("test-session", "job-1", "OTHER", "test content", 1),
         )
 
@@ -248,7 +249,7 @@ def test_session_isolation_results(tmp_path):
     session_b = new_session_id(conn)
 
     job_a = enqueue_job(conn, session_a, "ANALYSIS", {})
-    job_b = enqueue_job(conn, session_b, "ANALYSIS", {})
+    enqueue_job(conn, session_b, "ANALYSIS", {})
 
     # Write results for session A
     write_result(conn, session_a, job_a, "summary", "COMPLETED", "output A", "chart.png")

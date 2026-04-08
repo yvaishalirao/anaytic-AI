@@ -1,6 +1,6 @@
 import sqlite3
 
-from .db import write_result, get_session_results
+from .db import get_session_results, write_result
 
 
 class SessionMemory:

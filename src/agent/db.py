@@ -94,8 +94,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
 
 def enqueue_job(conn: sqlite3.Connection, session_id: str, job_type: str, payload: dict) -> str:
-    import uuid
     import json
+    import uuid
 
     job_id = str(uuid.uuid4())
     conn.execute(
@@ -123,7 +123,8 @@ def claim_next_job(conn: sqlite3.Connection) -> dict | None:
 
         # Get the claimed job
         row = conn.execute(
-            "SELECT id, session_id, job_type, status, payload, claimed_at, created_at FROM jobs WHERE status='PROCESSING' ORDER BY claimed_at DESC LIMIT 1"
+            "SELECT id, session_id, job_type, status, payload, claimed_at, created_at "
+            "FROM jobs WHERE status='PROCESSING' ORDER BY claimed_at DESC LIMIT 1"
         ).fetchone()
 
         if row is None:
