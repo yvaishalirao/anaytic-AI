@@ -193,6 +193,87 @@ def test_valid_code_success(tmp_path):
     assert result["error"] is None
 
 
+def test_session_isolation_creates_separate_outputs(tmp_path):
+    df_path = tmp_path / "data.csv"
+    df_path.write_text("col\n1\n2\n")
+    df_payload = {"mode": "path", "path": str(df_path)}
+
+    result_a = execute_code(
+        code="import matplotlib.pyplot as plt\nplt.plot([1, 2, 3])\nplt.savefig(outputs_dir + '/histogram.png')",
+        df_payload=df_payload,
+        session_id="session_a",
+        outputs_dir=str(tmp_path / "outputs"),
+        timeout=10,
+    )
+    result_b = execute_code(
+        code="import matplotlib.pyplot as plt\nplt.plot([4, 5, 6])\nplt.savefig(outputs_dir + '/histogram.png')",
+        df_payload=df_payload,
+        session_id="session_b",
+        outputs_dir=str(tmp_path / "outputs"),
+        timeout=10,
+    )
+
+    assert result_a["status"] == "success"
+    assert result_b["status"] == "success"
+    assert "histogram.png" in result_a["charts"]
+    assert "histogram.png" in result_b["charts"]
+    assert (tmp_path / "outputs" / "session_a" / "histogram.png").exists()
+    assert (tmp_path / "outputs" / "session_b" / "histogram.png").exists()
+
+
+def test_outputs_dir_prefix(tmp_path, monkeypatch):
+    df_path = tmp_path / "data.csv"
+    df_path.write_text("col\n1\n")
+    df_payload = {"mode": "path", "path": str(df_path)}
+    captured = {}
+
+    def fake_run(args, input, capture_output, text, timeout):
+        payload = json.loads(input)
+        captured["payload"] = payload
+        fake_proc = SimpleNamespace(stdout=json.dumps({
+            "status": "success",
+            "output": "ok",
+            "error": None,
+            "charts": [],
+        }), stderr="", returncode=0)
+        return fake_proc
+
+    monkeypatch.setattr("agent.executor.subprocess.run", fake_run)
+
+    result = execute_code(
+        code="print('ok')",
+        df_payload=df_payload,
+        session_id="session_x",
+        outputs_dir=str(tmp_path / "outputs"),
+        timeout=10,
+    )
+
+    assert result["status"] == "success"
+    assert captured["payload"]["outputs_dir"].startswith(str(tmp_path / "outputs" / "session_x"))
+
+
+def test_dotdot_session_id(tmp_path):
+    with pytest.raises(ValueError):
+        execute_code(
+            code="print('ok')",
+            df_payload={"mode": "path", "path": str(tmp_path / "data.csv")},
+            session_id="..",
+            outputs_dir=str(tmp_path / "outputs"),
+            timeout=10,
+        )
+
+
+def test_slash_session_id(tmp_path):
+    with pytest.raises(ValueError):
+        execute_code(
+            code="print('ok')",
+            df_payload={"mode": "path", "path": str(tmp_path / "data.csv")},
+            session_id="session/evil",
+            outputs_dir=str(tmp_path / "outputs"),
+            timeout=10,
+        )
+
+
 def test_empty_stdout(monkeypatch, tmp_path):
     df_payload = {"mode": "path", "path": str(tmp_path / "data.csv")}
     (tmp_path / "data.csv").write_text("col\n1\n")
