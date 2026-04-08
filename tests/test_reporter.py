@@ -1,10 +1,14 @@
 """Tests for Session 6: Report Generator (tasks 6.1–6.4)."""
 
+import re
+
 import pytest
 
 from agent.reporter import (
     REQUIRED_SECTIONS,
+    build_chart_section,
     fill_missing_sections,
+    validate_chart_paths,
     validate_report_sections,
 )
 
@@ -118,3 +122,114 @@ def test_fill_all_missing_from_empty():
     assert validate_report_sections(filled) == []
     for header in REQUIRED_SECTIONS:
         assert header in filled
+
+
+# ---------------------------------------------------------------------------
+# 6.2 — validate_chart_paths
+# ---------------------------------------------------------------------------
+
+def test_validate_chart_paths(tmp_path):
+    """validate_chart_paths splits correctly into valid and missing (6.2 TC-3)."""
+    existing = tmp_path / "hist.png"
+    existing.write_bytes(b"\x89PNG")
+    missing = str(tmp_path / "nonexistent.png")
+
+    valid, absent = validate_chart_paths(
+        [str(existing), missing], session_outputs_dir=str(tmp_path)
+    )
+
+    assert str(existing) in valid
+    assert missing in absent
+    assert missing not in valid
+    assert str(existing) not in absent
+
+
+def test_validate_chart_paths_all_valid(tmp_path):
+    """All paths existing → missing list is empty."""
+    p1 = tmp_path / "a.png"
+    p2 = tmp_path / "b.png"
+    p1.write_bytes(b"PNG")
+    p2.write_bytes(b"PNG")
+
+    valid, missing = validate_chart_paths(
+        [str(p1), str(p2)], session_outputs_dir=str(tmp_path)
+    )
+    assert len(valid) == 2
+    assert missing == []
+
+
+def test_validate_chart_paths_all_missing(tmp_path):
+    """No paths existing → valid list is empty."""
+    valid, missing = validate_chart_paths(
+        [str(tmp_path / "x.png"), str(tmp_path / "y.png")],
+        session_outputs_dir=str(tmp_path),
+    )
+    assert valid == []
+    assert len(missing) == 2
+
+
+# ---------------------------------------------------------------------------
+# 6.2 — build_chart_section
+# ---------------------------------------------------------------------------
+
+def test_chart_valid_embed(tmp_path):
+    """Existing chart path appears as a Markdown image reference (6.2 TC-1)."""
+    chart = tmp_path / "histogram.png"
+    chart.write_bytes(b"PNG")
+
+    section = build_chart_section([str(chart)], session_outputs_dir=str(tmp_path))
+
+    assert f"![chart]({chart})" in section
+
+
+def test_chart_missing_no_broken_ref(tmp_path):
+    """Missing chart produces an italic note — no ![...] reference (6.2 TC-2)."""
+    missing = str(tmp_path / "gone.png")
+
+    section = build_chart_section([missing], session_outputs_dir=str(tmp_path))
+
+    # Must NOT contain any Markdown image syntax
+    assert "![" not in section
+    # Must contain a plain-text note mentioning the filename
+    assert "gone.png" in section
+    assert "not available" in section.lower()
+
+
+def test_chart_no_broken_refs_for_nonexistent(tmp_path):
+    """No ![...](path) reference points to a non-existent file (6.2 TC-3 extended, I-18)."""
+    existing = tmp_path / "real.png"
+    existing.write_bytes(b"PNG")
+    missing = str(tmp_path / "fake.png")
+
+    section = build_chart_section(
+        [str(existing), missing], session_outputs_dir=str(tmp_path)
+    )
+
+    # Extract all image paths from Markdown image syntax ![...](path)
+    image_refs = re.findall(r"!\[.*?\]\((.*?)\)", section)
+    for ref in image_refs:
+        import os
+        assert os.path.exists(ref), (
+            f"Broken image reference in chart section: {ref!r}"
+        )
+
+
+def test_build_chart_section_empty_input(tmp_path):
+    """Empty chart list returns an empty string."""
+    section = build_chart_section([], session_outputs_dir=str(tmp_path))
+    assert section == ""
+
+
+def test_build_chart_section_mixed(tmp_path):
+    """Mixed valid/missing: image tag for valid, note for missing."""
+    good = tmp_path / "good.png"
+    good.write_bytes(b"PNG")
+    bad = str(tmp_path / "bad.png")
+
+    section = build_chart_section([str(good), bad], session_outputs_dir=str(tmp_path))
+
+    assert f"![chart]({good})" in section
+    assert "bad.png" in section
+    assert "not available" in section.lower()
+    # The missing path must NOT appear inside an image tag
+    assert f"![chart]({bad})" not in section

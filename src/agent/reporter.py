@@ -1,5 +1,6 @@
 """Report generator — Session 6 implementation (tasks 6.1–6.4)."""
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,62 @@ def fill_missing_sections(content: str, completed_analyses: list[str]) -> str:
         placeholder = _PLACEHOLDERS.get(header, "_Section not available._")
         content = content.rstrip("\n") + f"\n\n{header}\n\n{placeholder}\n"
     return content
+
+
+def validate_chart_paths(
+    chart_paths: list[str],
+    session_outputs_dir: str,
+) -> tuple[list[str], list[str]]:
+    """Split chart paths into existing and missing at report-write time (I-18).
+
+    Args:
+        chart_paths: Absolute or relative paths to chart PNG files.
+        session_outputs_dir: The session output directory (unused for the check
+            itself, but kept in the signature for callers that need it for context).
+
+    Returns:
+        (valid_paths, missing_paths) — paths verified with os.path.exists().
+    """
+    valid_paths: list[str] = []
+    missing_paths: list[str] = []
+    for path in chart_paths:
+        if os.path.exists(path):
+            valid_paths.append(path)
+        else:
+            missing_paths.append(path)
+    return valid_paths, missing_paths
+
+
+def build_chart_section(chart_paths: list[str], session_outputs_dir: str) -> str:
+    """Build a Markdown string embedding charts and noting any that are missing (I-18).
+
+    Valid charts are embedded as ``![chart](path)``.
+    Missing charts produce an italic note — never a broken image reference.
+
+    Args:
+        chart_paths: Paths to chart files (produced during analysis).
+        session_outputs_dir: Session output directory path.
+
+    Returns:
+        Markdown string. Empty string if chart_paths is empty.
+    """
+    if not chart_paths:
+        return ""
+
+    valid_paths, missing_paths = validate_chart_paths(chart_paths, session_outputs_dir)
+
+    lines: list[str] = []
+
+    for path in valid_paths:
+        lines.append(f"![chart]({path})")
+
+    for path in missing_paths:
+        basename = os.path.basename(path)
+        lines.append(
+            f"_Chart not available: {basename} (generation did not complete)_"
+        )
+
+    return "\n\n".join(lines)
 
 
 def generate_report(
