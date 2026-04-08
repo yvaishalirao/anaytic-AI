@@ -87,3 +87,96 @@ def test_service_processes_job(mock_report, mock_llm, db_conn, sales_csv):
     # Job must now be DONE
     row = db_conn.execute("SELECT status FROM jobs WHERE id=?", (job["id"],)).fetchone()
     assert row["status"] == "DONE", f"Expected DONE, got {row['status']}"
+
+
+# ---------------------------------------------------------------------------
+# 5.6 — Full end-to-end session with mocked LLM
+# ---------------------------------------------------------------------------
+
+@patch("agent.loop.call_planner_llm")
+def test_full_session_mocked_llm(mock_llm, db_conn, sales_csv, monkeypatch, tmp_path):
+    """Full PLAN→ACTION→OBSERVE loop with two real analysis steps then DONE (5.6).
+
+    Assertions:
+      1. reasoning_log has >= 6 entries
+      2. reasoning_log entries are in monotonically increasing seq order
+      3. memory.get_completed() contains both analysis types
+      4. memory.is_done("histogram_sales") is True
+      5. job status is DONE in the DB
+      6. No analysis appears twice in results
+      7. Report file exists at outputs/{session_id}/report.md
+    """
+    # Change CWD to tmp_path so outputs/ is created there (auto-restored by monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    import pandas as pd
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_analysis_job(db_conn, session_id, str(sales_csv))
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job["id"],),
+    )
+    job["status"] = "PROCESSING"
+
+    # LLM sequence: two real analyses then DONE
+    mock_llm.side_effect = iter([
+        {
+            "analysis_type": "histogram_sales",
+            "rationale": "understand sales distribution",
+            "code": "print(df['sales'].describe())",
+        },
+        {
+            "analysis_type": "count_by_region",
+            "rationale": "understand regional breakdown",
+            "code": "print(df.groupby('region').size())",
+        },
+        {
+            "analysis_type": "DONE",
+            "rationale": "all key analyses complete",
+            "code": "",
+        },
+    ])
+
+    from agent.loop import run_session
+    run_session(job, db_conn, profile, df_payload, api_key="test")
+
+    # --- 1. reasoning_log has >= 6 entries ---
+    log_entries = get_session_log(db_conn, session_id)
+    assert len(log_entries) >= 6, (
+        f"Expected >= 6 log entries, got {len(log_entries)}: "
+        + str([(e["step_type"], e["seq"]) for e in log_entries])
+    )
+
+    # --- 2. seq values are monotonically increasing ---
+    seqs = [e["seq"] for e in log_entries]
+    assert seqs == sorted(seqs), f"seq not monotonically increasing: {seqs}"
+    assert len(seqs) == len(set(seqs)), f"duplicate seq values: {seqs}"
+
+    # --- 3. both analyses recorded as COMPLETED ---
+    memory = SessionMemory(db_conn, session_id)
+    completed = memory.get_completed()
+    assert "histogram_sales" in completed, f"histogram_sales missing from: {completed}"
+    assert "count_by_region" in completed, f"count_by_region missing from: {completed}"
+
+    # --- 4. is_done returns True for histogram_sales ---
+    assert memory.is_done("histogram_sales") is True
+
+    # --- 5. job status is DONE ---
+    row = db_conn.execute("SELECT status FROM jobs WHERE id=?", (job["id"],)).fetchone()
+    assert row["status"] == "DONE", f"Expected DONE, got {row['status']}"
+
+    # --- 6. no analysis type appears twice in results ---
+    results = get_session_results(db_conn, session_id)
+    analysis_types = [r["analysis_type"] for r in results]
+    assert len(analysis_types) == len(set(analysis_types)), (
+        f"Duplicate analysis types in results: {analysis_types}"
+    )
+
+    # --- 7. report file exists ---
+    report_path = tmp_path / "outputs" / session_id / "report.md"
+    assert report_path.exists(), f"Report not found at {report_path}"

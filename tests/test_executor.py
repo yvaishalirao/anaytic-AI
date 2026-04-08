@@ -357,11 +357,11 @@ class MockSessionMemory:
         self.timeout = []
         self.results = []
 
-    def record_completed(self, analysis_type):
+    def record_completed(self, analysis_type, output=None, chart_path=None):
         self.completed.append(analysis_type)
         self.results.append({"analysis_type": analysis_type, "status": "COMPLETED"})
 
-    def record_failed(self, analysis_type):
+    def record_failed(self, analysis_type, error=None):
         self.failed.append(analysis_type)
         self.results.append({"analysis_type": analysis_type, "status": "FAILED"})
 

@@ -60,13 +60,19 @@ def infer_column_types(df: pd.DataFrame) -> dict[str, str]:
             result[col] = "boolean"
             continue
 
+        # Already-parsed datetime columns (e.g. when pandas auto-detects)
+        if pd.api.types.is_datetime64_any_dtype(dtype):
+            result[col] = "datetime"
+            continue
+
         # Check for pandas numeric dtypes
         if pd.api.types.is_numeric_dtype(dtype):
             result[col] = "numeric"
             continue
 
-        # For object dtype, check various possibilities
-        if dtype == "object":
+        # For string/object dtype columns (Python 3.14 pandas uses StringDtype
+        # instead of object for text columns — is_string_dtype covers both)
+        if pd.api.types.is_string_dtype(dtype) or dtype == "object":
             # Check if it looks like datetime
             with warnings.catch_warnings():
                 warnings.filterwarnings(
