@@ -1,7 +1,14 @@
 import pandas as pd
 import pytest
 
-from agent.profiler import compute_summary_stats, detect_missing, infer_column_types, load_csv
+from agent.profiler import (
+    assert_no_raw_rows,
+    compute_summary_stats,
+    detect_missing,
+    infer_column_types,
+    load_csv,
+    profile_csv,
+)
 
 
 def test_infer_datetime(sales_csv):
@@ -129,3 +136,46 @@ def test_no_missing(wide_csv):
     missing = detect_missing(df)
 
     assert missing == {}
+
+
+def test_profile_structure(sales_csv):
+    """Test that profile_csv output has required top-level keys."""
+    profile = profile_csv(str(sales_csv))
+
+    required_keys = {"row_count", "col_count", "file_name", "columns", "quality_issues"}
+    assert set(profile.keys()) == required_keys
+
+    assert isinstance(profile["row_count"], int)
+    assert isinstance(profile["col_count"], int)
+    assert isinstance(profile["file_name"], str)
+    assert isinstance(profile["columns"], list)
+    assert isinstance(profile["quality_issues"], list)
+
+
+def test_no_raw_rows(sales_csv):
+    """Test that assert_no_raw_rows passes on valid profile."""
+    profile = profile_csv(str(sales_csv))
+    df = pd.read_csv(sales_csv)
+
+    # This should not raise an AssertionError
+    assert_no_raw_rows(profile, df)
+
+
+def test_quality_issues(sales_csv):
+    """Test that quality_issues lists column with missing values."""
+    profile = profile_csv(str(sales_csv))
+
+    # The 'returned' column should have missing values
+    assert len(profile["quality_issues"]) > 0
+    issue_texts = [issue.lower() for issue in profile["quality_issues"]]
+    assert any("returned" in text and "missing" in text for text in issue_texts)
+
+
+def test_file_name_basename(sales_csv):
+    """Test that file_name is basename only."""
+    profile = profile_csv(str(sales_csv))
+
+    file_name = profile["file_name"]
+    assert file_name == "sales.csv"
+    assert "/" not in file_name
+    assert "\\" not in file_name

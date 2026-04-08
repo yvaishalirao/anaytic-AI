@@ -177,3 +177,112 @@ def detect_missing(df: pd.DataFrame) -> dict[str, float]:
             result[col] = round(missing_pct, 2)
 
     return result
+
+
+def profile_csv(path: str) -> dict:
+    """Profile a CSV file and return comprehensive metadata.
+
+    Args:
+        path: Path to the CSV file
+
+    Returns:
+        Dict with keys:
+        - row_count: int
+        - col_count: int
+        - file_name: str (basename only)
+        - columns: list of dicts with name, type, stats, missing_pct
+        - quality_issues: list of strings describing problems
+    """
+    df = load_csv(path)
+    col_types = infer_column_types(df)
+    stats = compute_summary_stats(df, col_types)
+    missing = detect_missing(df)
+
+    # Build columns list
+    columns = []
+    for col in df.columns:
+        col_info = {
+            "name": col,
+            "type": col_types.get(col, "unknown"),
+            "stats": stats.get(col, {}),
+            "missing_pct": missing.get(col, 0.0),
+        }
+        columns.append(col_info)
+
+    # Build quality issues
+    quality_issues = []
+    for col_info in columns:
+        if col_info["missing_pct"] > 0:
+            quality_issues.append(
+                f"column '{col_info['name']}' has {col_info['missing_pct']}% missing values"
+            )
+
+    return {
+        "row_count": len(df),
+        "col_count": len(df.columns),
+        "file_name": os.path.basename(path),
+        "columns": columns,
+        "quality_issues": quality_issues,
+    }
+
+
+def assert_no_raw_rows(profile: dict, df: pd.DataFrame):
+    """Assert that the profile contains no raw row data from the DataFrame.
+
+    Args:
+        profile: Profile dict returned by profile_csv
+        df: Original DataFrame
+
+    Raises:
+        AssertionError: If raw row data is detected in the profile
+    """
+    import json
+
+    # Sample up to 10 random rows
+    sample_size = min(10, len(df))
+    if sample_size > 0:
+        sample_df = df.sample(n=sample_size, random_state=42)
+    else:
+        sample_df = df
+
+    # Convert profile to JSON string
+    profile_json = json.dumps(profile, default=str)
+
+    # Get all allowed values from stats (these are computed metadata, not raw data)
+    allowed_values = set()
+    for col_info in profile.get("columns", []):
+        stats = col_info.get("stats", {})
+        # Add all stat values (min, max, mean, std, cardinality, top_values, dates, etc.)
+        for key, value in stats.items():
+            if isinstance(value, list):
+                allowed_values.update(str(v) for v in value)
+            elif isinstance(value, (int, float)):
+                # For numeric stats, allow both int and float representations
+                allowed_values.add(str(value))
+                allowed_values.add(str(int(value)) if value == int(value) else str(value))
+            else:
+                allowed_values.add(str(value))
+
+    # Also allow the missing_pct values
+    for col_info in profile.get("columns", []):
+        allowed_values.add(str(col_info.get("missing_pct", 0)))
+
+    # Check each cell in the sample
+    for _, row in sample_df.iterrows():
+        for cell_value in row:
+            cell_str = str(cell_value)
+            # Skip NaN values
+            if cell_str == 'nan':
+                continue
+            # Skip if it's in allowed values (computed metadata)
+            if cell_str in allowed_values:
+                continue
+            # Check if this raw cell value appears in the profile JSON
+            if cell_str in profile_json:
+                # Use word boundaries to avoid false positives (e.g., '4.0' in '24.0')
+                import re
+                if re.search(r'\b' + re.escape(cell_str) + r'\b', profile_json):
+                    raise AssertionError(
+                        f"Raw row data detected in profile: '{cell_str}' from DataFrame "
+                        f"appears in profile JSON"
+                    )
