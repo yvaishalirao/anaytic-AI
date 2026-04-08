@@ -132,6 +132,10 @@ def run_analysis_step(
     chart_paths = result.get("charts", [])
     chart_path = chart_paths[0] if chart_paths else None
 
+    # Resolve basename to full path so os.path.exists() works at report time
+    if chart_path is not None:
+        chart_path = str(Path("outputs") / session_id / chart_path)
+
     if result["status"] == "success":
         memory.record_completed(analysis_type, output_text, chart_path)
     elif result["status"] == "timeout":

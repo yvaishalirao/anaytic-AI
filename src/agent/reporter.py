@@ -109,7 +109,9 @@ def build_chart_section(chart_paths: list[str], session_outputs_dir: str) -> str
     lines: list[str] = []
 
     for path in valid_paths:
-        lines.append(f"![chart]({path})")
+        # Markdown requires forward slashes; normalise for Windows paths
+        md_path = path.replace("\\", "/")
+        lines.append(f"![chart]({md_path})")
 
     for path in missing_paths:
         basename = os.path.basename(path)

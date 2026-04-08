@@ -120,6 +120,18 @@ def main() -> None:
         sys.stdout.write(json.dumps(result))
         return
 
+    # Patch plt.savefig so every chart automatically rotates x-axis tick labels
+    # before saving — runs in the child process only, no effect on the parent.
+    _orig_savefig = plt.savefig
+
+    def _auto_savefig(fname, *args, **kwargs):
+        for ax in plt.gcf().get_axes():
+            plt.setp(ax.get_xticklabels(), rotation=90, ha="right")
+        plt.tight_layout()
+        _orig_savefig(fname, *args, **kwargs)
+
+    plt.savefig = _auto_savefig
+
     namespace = {
         "df": df,
         "pd": pd,

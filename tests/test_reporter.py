@@ -187,7 +187,7 @@ def test_chart_valid_embed(tmp_path):
 
     section = build_chart_section([str(chart)], session_outputs_dir=str(tmp_path))
 
-    assert f"![chart]({chart})" in section
+    assert f"![chart]({str(chart).replace(chr(92), '/')})" in section
 
 
 def test_chart_missing_no_broken_ref(tmp_path):
@@ -236,7 +236,7 @@ def test_build_chart_section_mixed(tmp_path):
 
     section = build_chart_section([str(good), bad], session_outputs_dir=str(tmp_path))
 
-    assert f"![chart]({good})" in section
+    assert f"![chart]({str(good).replace(chr(92), '/')})" in section
     assert "bad.png" in section
     assert "not available" in section.lower()
     # The missing path must NOT appear inside an image tag

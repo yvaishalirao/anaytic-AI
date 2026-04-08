@@ -104,13 +104,14 @@ if "session_id" in st.session_state:
         if chart_paths:
             cols = st.columns(min(len(chart_paths), 3))
             for i, path in enumerate(chart_paths):
-                if os.path.exists(path):
-                    cols[i % 3].image(path)
+                norm_path = path.replace("\\", "/")
+                if os.path.exists(norm_path):
+                    cols[i % 3].image(norm_path)
         else:
             st.info("No charts were generated.")
 
         st.subheader("Final Report")
-        report_path = f"outputs/{session_id}/report.md"
+        report_path = os.path.join("outputs", session_id, "report.md")
         if os.path.exists(report_path):
             st.markdown(Path(report_path).read_text(encoding="utf-8"))
         else:
@@ -127,17 +128,29 @@ if "session_id" in st.session_state:
                 "FOLLOWUP",
                 {"question": followup_q, "session_id": session_id},
             )
-            st.info("Question queued. Refresh to see the answer.")
+            st.info("Thinking... answer will appear below shortly.")
 
         # Display prior Q&A answers written by the agent service
         followup_results = [
-            r for r in results if r["analysis_type"].startswith("followup:")
+            r for r in get_session_results(conn, session_id)
+            if r["analysis_type"].startswith("followup:")
         ]
         for r in followup_results:
             question = r["analysis_type"].replace("followup:", "", 1)
             st.markdown(f"**Q:** {question}")
             st.markdown(f"**A:** {r['output']}")
             st.divider()
+
+        # Poll until all FOLLOWUP jobs for this session are answered
+        pending_followups = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE session_id=? AND job_type='FOLLOWUP' "
+            "AND status NOT IN ('DONE','FAILED')",
+            (session_id,),
+        ).fetchone()[0]
+        if pending_followups > 0:
+            import time
+            time.sleep(2)
+            st.rerun()
 
     elif status == "FAILED":
         st.error("Analysis failed. Check the reasoning log for details.")
