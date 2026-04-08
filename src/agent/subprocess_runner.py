@@ -5,6 +5,8 @@ import os
 import sys
 import traceback
 
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend — no popup windows
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns

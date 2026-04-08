@@ -84,17 +84,19 @@ if "session_id" in st.session_state:
 
     st.caption(f"Session `{session_id[:8]}...` — status: **{status}**")
 
-    # --- Reasoning Log ---
-    st.subheader("Reasoning Log")
+    # --- Reasoning Log (collapsed by default) ---
     log_entries = get_session_log(conn, session_id)
-    if not log_entries:
-        st.info("Waiting for agent to start...")
-    else:
-        for entry in log_entries:
-            icon = {"PLAN": "🗺️", "ACTION": "⚙️", "OBSERVE": "🔍"}.get(
-                entry["step_type"], "•"
-            )
-            st.write(f"{icon} **{entry['step_type']}** — {entry['content']}")
+    with st.expander(
+        f"Agent Log ({len(log_entries)} steps)" if log_entries else "Agent Log",
+        expanded=status not in ("DONE", "FAILED"),
+    ):
+        if not log_entries:
+            st.caption("Waiting for agent to start...")
+        else:
+            icon_map = {"PLAN": "🗺️", "ACTION": "⚙️", "OBSERVE": "🔍"}
+            for entry in log_entries:
+                icon = icon_map.get(entry["step_type"], "•")
+                st.caption(f"{icon} **{entry['step_type']}** — {entry['content']}")
 
     # --- Charts and Report (only when done) ---
     if status == "DONE":
@@ -113,7 +115,13 @@ if "session_id" in st.session_state:
         st.subheader("Final Report")
         report_path = os.path.join("outputs", session_id, "report.md")
         if os.path.exists(report_path):
-            st.markdown(Path(report_path).read_text(encoding="utf-8"))
+            raw = Path(report_path).read_text(encoding="utf-8")
+            # Strip embedded image lines — charts are shown above in Generated Charts
+            report_text = "\n".join(
+                line for line in raw.splitlines()
+                if not line.strip().startswith("![")
+            )
+            st.markdown(report_text)
         else:
             st.warning("Report not yet available.")
 
