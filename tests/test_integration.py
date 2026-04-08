@@ -195,6 +195,32 @@ def test_full_session_mocked_llm(mock_llm, db_conn, sales_csv, monkeypatch, tmp_
 # 6.4 — validate_session_output unit tests
 # ---------------------------------------------------------------------------
 
+def test_upload_creates_job(db_conn, sales_csv):
+    """Uploading a CSV enqueues a PENDING ANALYSIS job in the DB (7.1 TC-3)."""
+    from agent.db import new_session_id, enqueue_job
+
+    # Simulate what app.py does on file upload
+    session_id = new_session_id(db_conn)
+    csv_path = str(sales_csv)
+
+    job_id = enqueue_job(
+        db_conn,
+        session_id,
+        "ANALYSIS",
+        {"csv_path": csv_path, "file_name": "sales.csv"},
+    )
+
+    # Verify job is visible with PENDING status
+    row = db_conn.execute(
+        "SELECT status, job_type, session_id FROM jobs WHERE id=?", (job_id,)
+    ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "PENDING"
+    assert row["job_type"] == "ANALYSIS"
+    assert row["session_id"] == session_id
+
+
 def test_validator_catches_missing_section(tmp_path):
     """Partial report without Anomalies section → valid=False, errors mention Anomalies (6.4 TC-2)."""
     session_id = "test-session-validator-001"
