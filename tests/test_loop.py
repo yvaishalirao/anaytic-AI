@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from agent.db import init_db, get_conn, get_session_log
-from agent.loop import ReasoningLogger
+import os
+
+from agent.db import init_db, get_conn, get_session_log, enqueue_job, new_session_id
+from agent.loop import ReasoningLogger, run_session
 from agent.planner import (
     MAX_HISTORY_STEPS,
     build_planner_prompt,
@@ -452,3 +454,170 @@ def test_logger_convenience_methods(db_conn):
 
     entries = get_session_log(db_conn, "sess-001")
     assert [e["step_type"] for e in entries] == ["PLAN", "ACTION", "OBSERVE"]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for 5.4 — run_session
+# ---------------------------------------------------------------------------
+
+def _make_job(conn, session_id: str) -> dict:
+    """Enqueue and return a minimal ANALYSIS job dict."""
+    job_id = enqueue_job(conn, session_id, "ANALYSIS", {"csv_path": "dummy.csv"})
+    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return {
+        "id": row[0],
+        "session_id": row[1],
+        "job_type": row[2],
+        "status": row[3],
+        "payload": row[4],
+    }
+
+
+def _llm_sequence(*responses):
+    """Return a side_effect list that yields each response dict in turn, then DONE."""
+    done = {"analysis_type": "DONE", "rationale": "finished", "code": ""}
+    items = list(responses) + [done]
+    return iter(items)
+
+
+# ---------------------------------------------------------------------------
+# 5.4 — run_session tests
+# ---------------------------------------------------------------------------
+
+@patch("agent.loop.generate_report")
+@patch("agent.loop.call_planner_llm")
+def test_iteration_cap(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
+    """Loop stops exactly at max_iterations even if LLM never returns DONE (5.4 TC-1)."""
+    # LLM always returns a new (non-done, non-duplicate) analysis type
+    counter = {"n": 0}
+    def _unique_plan(*a, **kw):
+        counter["n"] += 1
+        return {"analysis_type": f"step_{counter['n']}", "rationale": "r", "code": "print(1)"}
+    mock_llm.side_effect = _unique_plan
+    mock_report.return_value = None
+
+    from agent.profiler import profile_csv, get_df_transfer_payload
+    import pandas as pd
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_job(db_conn, session_id)
+    # Claim the job so status is PROCESSING
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job["id"],))
+
+    run_session(job, db_conn, profile, df_payload, api_key="test", max_iterations=3)
+
+    assert mock_llm.call_count == 3
+
+
+@patch("agent.loop.generate_report")
+@patch("agent.loop.call_planner_llm")
+def test_done_terminates_loop(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
+    """DONE response terminates loop before max_iterations (5.4 TC-2)."""
+    mock_llm.return_value = {"analysis_type": "DONE", "rationale": "no more", "code": ""}
+    mock_report.return_value = None
+
+    from agent.profiler import profile_csv, get_df_transfer_payload
+    import pandas as pd
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_job(db_conn, session_id)
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job["id"],))
+
+    run_session(job, db_conn, profile, df_payload, api_key="test", max_iterations=10)
+
+    # LLM called once; loop exited immediately
+    assert mock_llm.call_count == 1
+
+
+@patch("agent.loop.generate_report")
+@patch("agent.loop.call_planner_llm")
+def test_skip_completed(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
+    """Already-completed analysis is skipped with an OBSERVE log entry (5.4 TC-3)."""
+    from agent.db import write_result
+    from agent.profiler import profile_csv, get_df_transfer_payload
+    import pandas as pd
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_job(db_conn, session_id)
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job["id"],))
+
+    # Pre-mark "histogram_sales" as COMPLETED in the DB
+    write_result(db_conn, session_id, job["id"], "histogram_sales", "COMPLETED", "output", None)
+
+    # LLM first proposes the already-completed analysis, then DONE
+    mock_llm.side_effect = _llm_sequence(
+        {"analysis_type": "histogram_sales", "rationale": "r", "code": "print(1)"},
+    )
+    mock_report.return_value = None
+
+    run_session(job, db_conn, profile, df_payload, api_key="test", max_iterations=10)
+
+    log = get_session_log(db_conn, session_id)
+    observe_entries = [e for e in log if e["step_type"] == "OBSERVE"]
+    skip_entries = [e for e in observe_entries if "skipping" in e["content"].lower()]
+    assert len(skip_entries) >= 1
+
+
+@patch("agent.loop.generate_report")
+@patch("agent.loop.call_planner_llm")
+def test_plan_before_llm(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
+    """PLAN log entry is written before the LLM is called each iteration (5.4 TC-4)."""
+    plan_seq_at_call: list[int] = []
+
+    from agent.profiler import profile_csv, get_df_transfer_payload
+    import pandas as pd
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_job(db_conn, session_id)
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job["id"],))
+
+    def _capture_and_return(*a, **kw):
+        # Count how many PLAN entries exist in the DB at the moment of LLM call
+        log = get_session_log(db_conn, session_id)
+        plan_seq_at_call.append(len([e for e in log if e["step_type"] == "PLAN"]))
+        return {"analysis_type": "DONE", "rationale": "done", "code": ""}
+
+    mock_llm.side_effect = _capture_and_return
+    mock_report.return_value = None
+
+    run_session(job, db_conn, profile, df_payload, api_key="test", max_iterations=5)
+
+    # At every LLM call there must already be at least one PLAN entry
+    assert all(count >= 1 for count in plan_seq_at_call)
+
+
+@patch("agent.loop.generate_report")
+@patch("agent.loop.call_planner_llm")
+def test_report_generated_after_loop(mock_llm, mock_report, db_conn, tmp_path, sales_csv):
+    """generate_report is called exactly once after the loop exits (5.4 TC-5)."""
+    mock_llm.return_value = {"analysis_type": "DONE", "rationale": "done", "code": ""}
+    mock_report.return_value = None
+
+    from agent.profiler import profile_csv, get_df_transfer_payload
+    import pandas as pd
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_job(db_conn, session_id)
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job["id"],))
+
+    run_session(job, db_conn, profile, df_payload, api_key="test")
+
+    mock_report.assert_called_once()

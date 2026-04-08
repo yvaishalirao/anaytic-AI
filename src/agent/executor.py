@@ -128,12 +128,16 @@ def run_analysis_step(
     result = execute_code(code, df_payload, session_id, "outputs", timeout)
 
     # Record to memory based on status
+    output_text = result.get("output") or ""
+    chart_paths = result.get("charts", [])
+    chart_path = chart_paths[0] if chart_paths else None
+
     if result["status"] == "success":
-        memory.record_completed(analysis_type)
+        memory.record_completed(analysis_type, output_text, chart_path)
     elif result["status"] == "timeout":
         memory.record_timeout(analysis_type)
     elif result["status"] == "error":
-        memory.record_failed(analysis_type)
+        memory.record_failed(analysis_type, result.get("error") or "")
 
     # Write OBSERVE log entry with result summary
     summary = f"Result: {result['status']}"
