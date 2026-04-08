@@ -671,3 +671,48 @@ def test_profiler_loop_executor_importable_without_service():
     import agent.profiler  # noqa: F401
 
     assert "agent.agent_service" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# I-07 — UI write boundary
+# ---------------------------------------------------------------------------
+
+def test_ui_no_write_result_or_log_entry():
+    """write_result and write_log_entry must not be imported or called in ui/app.py (I-07)."""
+    import pathlib
+    import re
+
+    app_path = pathlib.Path(__file__).resolve().parents[1] / "src" / "ui" / "app.py"
+    # Strip comment lines before checking so the boundary-description comment is ignored
+    non_comment_lines = [
+        line for line in app_path.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    source = "\n".join(non_comment_lines)
+
+    assert "write_result" not in source, (
+        "I-07 violated: write_result imported or called in ui/app.py"
+    )
+    assert "write_log_entry" not in source, (
+        "I-07 violated: write_log_entry imported or called in ui/app.py"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-08 — No exec/eval/compile in executor.py
+# ---------------------------------------------------------------------------
+
+def test_executor_no_exec_eval_compile():
+    """exec(), eval(), and compile() must not appear in executor.py (I-08)."""
+    import pathlib
+    import re
+
+    executor_path = (
+        pathlib.Path(__file__).resolve().parents[1] / "src" / "agent" / "executor.py"
+    )
+    source = executor_path.read_text(encoding="utf-8")
+
+    for forbidden in ("exec(", "eval(", "compile("):
+        assert forbidden not in source, (
+            f"I-08 violated: '{forbidden}' found in executor.py"
+        )

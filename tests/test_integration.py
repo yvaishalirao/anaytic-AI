@@ -816,3 +816,171 @@ def test_validator_passes_complete_session(tmp_path):
 
     assert result["valid"] is True
     assert result["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# I-24 structural validator — end-to-end (8.x)
+# ---------------------------------------------------------------------------
+
+# Chart-saving code snippets each step's subprocess will execute.
+# `outputs_dir` is injected into the subprocess namespace by subprocess_runner.py.
+_CHART_CODE = [
+    (
+        "hist_sales",
+        "plt.figure()\nplt.bar([1,2,3],[10,20,15])\n"
+        "plt.savefig(outputs_dir + '/hist_sales.png')\nplt.close()\n"
+        "print('histogram done')",
+    ),
+    (
+        "scatter_units",
+        "plt.figure()\nplt.scatter([1,2,3],[4,5,6])\n"
+        "plt.savefig(outputs_dir + '/scatter_units.png')\nplt.close()\n"
+        "print('scatter done')",
+    ),
+    (
+        "bar_region",
+        "plt.figure()\nplt.bar(['N','S','E','W'],[10,8,12,9])\n"
+        "plt.savefig(outputs_dir + '/bar_region.png')\nplt.close()\n"
+        "print('bar done')",
+    ),
+]
+
+# Alternative analysis sets used in the multi-run test to vary LLM responses.
+_ALT_CHART_SETS = [
+    [
+        ("trend_line",
+         "plt.figure()\nplt.plot([1,2,3,4],[1,4,9,16])\n"
+         "plt.savefig(outputs_dir + '/trend_line.png')\nplt.close()\nprint('done')"),
+        ("box_sales",
+         "plt.figure()\nplt.boxplot([1,2,3,4,5])\n"
+         "plt.savefig(outputs_dir + '/box_sales.png')\nplt.close()\nprint('done')"),
+    ],
+    [
+        ("pie_region",
+         "plt.figure()\nplt.pie([25,25,25,25],labels=['N','S','E','W'])\n"
+         "plt.savefig(outputs_dir + '/pie_region.png')\nplt.close()\nprint('done')"),
+        ("heatmap",
+         "import numpy as np\nplt.figure()\nplt.imshow([[1,2],[3,4]])\n"
+         "plt.savefig(outputs_dir + '/heatmap.png')\nplt.close()\nprint('done')"),
+        ("cumsum",
+         "plt.figure()\nplt.plot([1,3,6,10])\n"
+         "plt.savefig(outputs_dir + '/cumsum.png')\nplt.close()\nprint('done')"),
+    ],
+    [
+        ("violinplot",
+         "plt.figure()\nplt.violinplot([[1,2,3,4,5]])\n"
+         "plt.savefig(outputs_dir + '/violin.png')\nplt.close()\nprint('done')"),
+    ],
+    [
+        ("step_chart",
+         "plt.figure()\nplt.step([1,2,3],[1,4,9])\n"
+         "plt.savefig(outputs_dir + '/step.png')\nplt.close()\nprint('done')"),
+        ("area_chart",
+         "plt.figure()\nplt.fill_between([1,2,3],[0,1,0])\n"
+         "plt.savefig(outputs_dir + '/area.png')\nplt.close()\nprint('done')"),
+    ],
+    [
+        ("stem_plot",
+         "plt.figure()\nplt.stem([1,2,3],[3,1,2])\n"
+         "plt.savefig(outputs_dir + '/stem.png')\nplt.close()\nprint('done')"),
+        ("hist2d",
+         "import numpy as np\nplt.figure()\nplt.hist(np.random.rand(50))\n"
+         "plt.savefig(outputs_dir + '/hist2d.png')\nplt.close()\nprint('done')"),
+        ("errorbar",
+         "plt.figure()\nplt.errorbar([1,2,3],[1,4,9],yerr=[0.1,0.2,0.1])\n"
+         "plt.savefig(outputs_dir + '/errbar.png')\nplt.close()\nprint('done')"),
+    ],
+]
+
+
+def _run_charted_session(db_conn, sales_csv, tmp_path, monkeypatch, analysis_set):
+    """Helper: run a full session where each analysis step saves a real .png chart.
+
+    Returns (session_id, outputs_base_str).
+    """
+    import pandas as pd
+    from agent.loop import run_session
+
+    monkeypatch.chdir(tmp_path)
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_analysis_job(db_conn, session_id, str(sales_csv))
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job["id"],),
+    )
+    job["status"] = "PROCESSING"
+
+    llm_responses = [
+        {"analysis_type": atype, "rationale": f"analyse {atype}", "code": code}
+        for atype, code in analysis_set
+    ] + [{"analysis_type": "DONE", "rationale": "complete", "code": ""}]
+
+    with patch("agent.loop.call_planner_llm", side_effect=iter(llm_responses)), \
+         patch("agent.loop.maybe_summarise", side_effect=lambda h, s, k: h):
+        run_session(job, db_conn, profile, df_payload, api_key="test")
+
+    return session_id, str(tmp_path / "outputs")
+
+
+@patch("agent.loop.maybe_summarise", side_effect=lambda history, step, key: history)
+@patch("agent.loop.call_planner_llm")
+def test_structural_validator_full_session(mock_llm, _mock_summarise, db_conn, sales_csv, monkeypatch, tmp_path):
+    """Full session with 3 chart-producing steps passes validate_session_output (I-24)."""
+    import pandas as pd
+    from agent.loop import run_session
+
+    monkeypatch.chdir(tmp_path)
+
+    df = pd.read_csv(str(sales_csv))
+    profile = profile_csv(str(sales_csv))
+    df_payload = get_df_transfer_payload(df, str(sales_csv))
+
+    session_id = new_session_id(db_conn)
+    job = _make_analysis_job(db_conn, session_id, str(sales_csv))
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job["id"],),
+    )
+    job["status"] = "PROCESSING"
+
+    mock_llm.side_effect = iter(
+        [
+            {"analysis_type": atype, "rationale": f"run {atype}", "code": code}
+            for atype, code in _CHART_CODE
+        ]
+        + [{"analysis_type": "DONE", "rationale": "all done", "code": ""}]
+    )
+
+    run_session(job, db_conn, profile, df_payload, api_key="test")
+
+    outputs_base = str(tmp_path / "outputs")
+    result = validate_session_output(session_id, outputs_base=outputs_base, conn=db_conn)
+
+    assert result["valid"] is True, (
+        f"validate_session_output failed:\n" + "\n".join(result["errors"])
+    )
+    assert result["errors"] == []
+
+
+def test_structural_validator_ten_runs(db_conn, sales_csv, monkeypatch, tmp_path):
+    """validate_session_output returns valid=True across 5 runs with varied LLM responses (I-24)."""
+    for run_idx, analysis_set in enumerate(_ALT_CHART_SETS):
+        session_id, outputs_base = _run_charted_session(
+            db_conn, sales_csv, tmp_path, monkeypatch, analysis_set
+        )
+
+        result = validate_session_output(
+            session_id, outputs_base=outputs_base, conn=db_conn
+        )
+
+        assert result["valid"] is True, (
+            f"Run {run_idx} failed validation:\n" + "\n".join(result["errors"])
+        )
+        assert result["errors"] == [], (
+            f"Run {run_idx} had unexpected errors: {result['errors']}"
+        )
