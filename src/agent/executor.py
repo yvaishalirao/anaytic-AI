@@ -2,6 +2,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.memory import SessionMemory
+    from agent.loop import ReasoningLogger
 
 RUNNER_PATH = Path(__file__).parent / "subprocess_runner.py"
 assert RUNNER_PATH.exists(), f"subprocess runner not found: {RUNNER_PATH}"
@@ -93,5 +98,51 @@ def execute_code(
             "error": "subprocess produced no output",
             "charts": [],
         }
+
+    return result
+
+
+def run_analysis_step(
+    code: str,
+    analysis_type: str,
+    df_payload: dict,
+    session_id: str,
+    memory: "SessionMemory",
+    log: "ReasoningLogger",
+    timeout: int = 60
+) -> dict:
+    """
+    Wraps execute_code() and writes results to memory and reasoning log.
+    - Writes ACTION log entry BEFORE calling execute_code (I-20)
+    - Calls execute_code()
+    - On status=success: calls memory.record_completed()
+    - On status=timeout: calls memory.record_timeout()
+    - On status=error: calls memory.record_failed()
+    - Writes OBSERVE log entry with the result summary
+    - Returns the execute_code result dict
+    """
+    # Write ACTION log entry BEFORE calling execute_code
+    log.log_action(f"Executing {analysis_type} analysis: {code[:100]}{'...' if len(code) > 100 else ''}")
+
+    # Call execute_code
+    result = execute_code(code, df_payload, session_id, "outputs", timeout)
+
+    # Record to memory based on status
+    if result["status"] == "success":
+        memory.record_completed(analysis_type)
+    elif result["status"] == "timeout":
+        memory.record_timeout(analysis_type)
+    elif result["status"] == "error":
+        memory.record_failed(analysis_type)
+
+    # Write OBSERVE log entry with result summary
+    summary = f"Result: {result['status']}"
+    if result["output"]:
+        summary += f", output: {result['output'][:100]}{'...' if len(result['output']) > 100 else ''}"
+    if result["error"]:
+        summary += f", error: {result['error'][:100]}{'...' if len(result['error']) > 100 else ''}"
+    if result["charts"]:
+        summary += f", charts: {result['charts']}"
+    log.log_observe(summary)
 
     return result
