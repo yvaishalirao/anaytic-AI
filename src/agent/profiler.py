@@ -3,6 +3,8 @@ import warnings
 
 import pandas as pd
 
+LARGE_FILE_ROW_THRESHOLD = 50_000
+
 
 def load_csv(path: str) -> pd.DataFrame:
     """Load a CSV file into a pandas DataFrame.
@@ -286,3 +288,55 @@ def assert_no_raw_rows(profile: dict, df: pd.DataFrame):
                         f"Raw row data detected in profile: '{cell_str}' from DataFrame "
                         f"appears in profile JSON"
                     )
+
+
+def serialize_df(df: pd.DataFrame) -> bytes:
+    """Serialize DataFrame to parquet bytes.
+
+    Args:
+        df: DataFrame to serialize
+
+    Returns:
+        Bytes containing parquet data
+    """
+    import io
+    buffer = io.BytesIO()
+    df.to_parquet(buffer)
+    return buffer.getvalue()
+
+
+def deserialize_df(data: bytes) -> pd.DataFrame:
+    """Deserialize parquet bytes back to DataFrame.
+
+    Args:
+        data: Parquet bytes
+
+    Returns:
+        Reconstructed DataFrame
+    """
+    import io
+    buffer = io.BytesIO(data)
+    return pd.read_parquet(buffer)
+
+
+def get_df_transfer_payload(df: pd.DataFrame, csv_path: str) -> dict:
+    """Get transfer payload for DataFrame based on size.
+
+    For small DataFrames, serializes to base64-encoded bytes.
+    For large DataFrames, uses file path.
+
+    Args:
+        df: DataFrame to transfer
+        csv_path: Path to the original CSV file
+
+    Returns:
+        Dict with mode and data/path
+    """
+    import base64
+
+    if len(df) <= LARGE_FILE_ROW_THRESHOLD:
+        serialized = serialize_df(df)
+        encoded = base64.b64encode(serialized).decode()
+        return {"mode": "bytes", "data": encoded}
+    else:
+        return {"mode": "path", "path": csv_path}

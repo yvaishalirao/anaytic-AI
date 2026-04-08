@@ -4,10 +4,13 @@ import pytest
 from agent.profiler import (
     assert_no_raw_rows,
     compute_summary_stats,
+    deserialize_df,
     detect_missing,
+    get_df_transfer_payload,
     infer_column_types,
     load_csv,
     profile_csv,
+    serialize_df,
 )
 
 
@@ -179,3 +182,65 @@ def test_file_name_basename(sales_csv):
     assert file_name == "sales.csv"
     assert "/" not in file_name
     assert "\\" not in file_name
+
+
+def test_serialize_roundtrip(sales_csv):
+    """Test that serialize/deserialize round-trip preserves DataFrame shape."""
+    df = pd.read_csv(sales_csv)
+    original_shape = df.shape
+    original_columns = list(df.columns)
+    original_dtypes = df.dtypes.to_dict()
+
+    # Serialize and deserialize
+    serialized = serialize_df(df)
+    deserialized = deserialize_df(serialized)
+
+    # Check shape preservation
+    assert deserialized.shape == original_shape
+    assert list(deserialized.columns) == original_columns
+    assert deserialized.dtypes.to_dict() == original_dtypes
+
+
+def test_transfer_small_df(sales_csv):
+    """Test that small DataFrame uses bytes mode."""
+    df = pd.read_csv(sales_csv)
+    # sales_csv has 50 rows, which is < 50_000
+    payload = get_df_transfer_payload(df, str(sales_csv))
+
+    assert payload["mode"] == "bytes"
+    assert "data" in payload
+    assert isinstance(payload["data"], str)  # base64 encoded
+
+
+def test_transfer_large_df(tmp_path):
+    """Test that large DataFrame uses path mode."""
+    # Create a large DataFrame with 60,000 rows
+    large_df = pd.DataFrame({
+        "col1": range(60000),
+        "col2": ["value"] * 60000
+    })
+
+    csv_path = tmp_path / "large.csv"
+    large_df.to_csv(csv_path, index=False)
+
+    payload = get_df_transfer_payload(large_df, str(csv_path))
+
+    assert payload["mode"] == "path"
+    assert payload["path"] == str(csv_path)
+
+
+def test_deserialize_bytes(sales_csv):
+    """Test that deserialize handles bytes payload correctly."""
+    df = pd.read_csv(sales_csv)
+    payload = get_df_transfer_payload(df, str(sales_csv))
+
+    # Extract and decode the bytes
+    import base64
+    serialized_bytes = base64.b64decode(payload["data"])
+    reconstructed = deserialize_df(serialized_bytes)
+
+    # Check reconstruction
+    assert reconstructed.shape == df.shape
+    assert list(reconstructed.columns) == list(df.columns)
+    # Check a few sample values
+    assert reconstructed.iloc[0, 0] == df.iloc[0, 0]
