@@ -367,6 +367,93 @@ def test_failed_status_display(db_conn):
 
 
 # ---------------------------------------------------------------------------
+# 8.1 — Follow-up handler (plan test IDs)
+# ---------------------------------------------------------------------------
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_handler(mock_client, db_conn):
+    """FOLLOWUP job produces a result entry with analysis_type starting followup: (8.1 TC-1)."""
+    from agent.agent_service import dispatch_job
+    from agent.db import write_result
+
+    mock_client.return_value.chat.completions.create.return_value.choices[
+        0
+    ].message.content = "Trends are positive."
+
+    session_id = new_session_id(db_conn)
+    analysis_job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+    write_result(
+        db_conn, session_id, analysis_job_id,
+        "sales_trend", "COMPLETED", "mean=1500", None,
+    )
+
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "What trends exist?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    dispatch_job(job, db_conn, api_key="test-key")
+
+    results = get_session_results(db_conn, session_id)
+    followup = [r for r in results if r["analysis_type"].startswith("followup:")]
+    assert len(followup) >= 1, (
+        f"No followup: result found. Got: {[r['analysis_type'] for r in results]}"
+    )
+    assert followup[0]["status"] == "COMPLETED"
+
+
+@patch("agent.agent_service._make_llm_client")
+def test_followup_uses_findings(mock_client, db_conn):
+    """The LLM prompt for a FOLLOWUP job contains prior session findings (8.1 TC-3)."""
+    from agent.agent_service import dispatch_job
+    from agent.db import write_result
+
+    captured_prompts: list[str] = []
+
+    def capture_create(**kwargs):
+        for msg in kwargs.get("messages", []):
+            captured_prompts.append(msg.get("content", ""))
+        mock_resp = mock_client.return_value.chat.completions.create.return_value
+        mock_resp.choices[0].message.content = "Answer based on findings."
+        return mock_resp
+
+    mock_client.return_value.chat.completions.create.side_effect = capture_create
+
+    session_id = new_session_id(db_conn)
+    analysis_job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+    write_result(
+        db_conn, session_id, analysis_job_id,
+        "regional_breakdown", "COMPLETED", "North=45 South=30 East=25", None,
+    )
+
+    job_id = enqueue_job(
+        db_conn, session_id, "FOLLOWUP",
+        {"question": "Which region leads?", "session_id": session_id},
+    )
+    db_conn.execute(
+        "UPDATE jobs SET status='PROCESSING', claimed_at=unixepoch() WHERE id=?",
+        (job_id,),
+    )
+    job = dict(db_conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+
+    dispatch_job(job, db_conn, api_key="test-key")
+
+    assert captured_prompts, "LLM was not called"
+    combined = "\n".join(captured_prompts)
+    assert "regional_breakdown" in combined, (
+        f"Findings not in prompt. Prompt was:\n{combined}"
+    )
+    assert "North=45" in combined, (
+        f"Finding output not in prompt. Prompt was:\n{combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 7.4 — Follow-up Q&A (plan test IDs)
 # ---------------------------------------------------------------------------
 
