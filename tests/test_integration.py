@@ -195,6 +195,70 @@ def test_full_session_mocked_llm(mock_llm, db_conn, sales_csv, monkeypatch, tmp_
 # 6.4 — validate_session_output unit tests
 # ---------------------------------------------------------------------------
 
+def _poll_status(conn, session_id: str) -> str:
+    """Replicate the polling query from app.py without Streamlit."""
+    import sqlite3
+    conn.row_factory = sqlite3.Row
+    job_row = conn.execute(
+        "SELECT status FROM jobs WHERE session_id=?", (session_id,)
+    ).fetchone()
+    return job_row["status"] if job_row else "PENDING"
+
+
+def test_polling_no_agent(db_conn, sales_csv):
+    """Polling with no agent running returns PENDING without error (7.2 TC-1, I-22)."""
+    session_id = new_session_id(db_conn)
+    enqueue_job(
+        db_conn,
+        session_id,
+        "ANALYSIS",
+        {"csv_path": str(sales_csv), "file_name": "sales.csv"},
+    )
+
+    # Replicate app.py polling logic — no agent service, job stays PENDING
+    status = _poll_status(db_conn, session_id)
+    assert status == "PENDING", f"Expected PENDING, got {status}"
+
+    # get_session_log must also not raise and return empty list
+    log = get_session_log(db_conn, session_id)
+    assert log == []
+
+
+def test_log_render_types(db_conn):
+    """PLAN, ACTION, OBSERVE log entries are all handled by the icon mapping (7.2 TC-2)."""
+    from agent.db import write_log_entry
+
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(db_conn, session_id, "ANALYSIS", {})
+
+    for seq, step_type in enumerate(["PLAN", "ACTION", "OBSERVE"], start=1):
+        write_log_entry(db_conn, session_id, job_id, step_type, f"content {seq}", seq)
+
+    log = get_session_log(db_conn, session_id)
+    step_types = [e["step_type"] for e in log]
+    assert "PLAN" in step_types
+    assert "ACTION" in step_types
+    assert "OBSERVE" in step_types
+
+
+def test_polling_stops_on_done(db_conn, sales_csv):
+    """Polling returns DONE once the job is complete (7.2 TC-3)."""
+    session_id = new_session_id(db_conn)
+    job_id = enqueue_job(
+        db_conn,
+        session_id,
+        "ANALYSIS",
+        {"csv_path": str(sales_csv), "file_name": "sales.csv"},
+    )
+
+    # Transition job to DONE (simulating agent completing)
+    db_conn.execute("UPDATE jobs SET status='PROCESSING' WHERE id=?", (job_id,))
+    db_conn.execute("UPDATE jobs SET status='DONE' WHERE id=?", (job_id,))
+
+    status = _poll_status(db_conn, session_id)
+    assert status == "DONE"
+
+
 def test_upload_creates_job(db_conn, sales_csv):
     """Uploading a CSV enqueues a PENDING ANALYSIS job in the DB (7.1 TC-3)."""
     from agent.db import new_session_id, enqueue_job

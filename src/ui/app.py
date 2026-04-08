@@ -75,12 +75,13 @@ if uploaded_file is not None and "session_id" not in st.session_state:
 if "session_id" in st.session_state:
     session_id = st.session_state["session_id"]
     conn = get_conn(DB_PATH)
+    conn.row_factory = __import__("sqlite3").Row
 
     # Poll current job status
     job_row = conn.execute(
         "SELECT status FROM jobs WHERE session_id=?", (session_id,)
     ).fetchone()
-    status = job_row[0] if job_row else "PENDING"
+    status = job_row["status"] if job_row else "PENDING"
 
     st.caption(f"Session `{session_id[:8]}...` — status: **{status}**")
 
