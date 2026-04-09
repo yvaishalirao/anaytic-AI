@@ -11,27 +11,27 @@ An autonomous local data analysis agent. Upload a CSV file, and the agent plans 
 The system runs as **two independent OS processes** that communicate exclusively through a SQLite database (WAL mode). No sockets, no shared memory, no direct function calls across the process boundary.
 
 ```
-┌─────────────────────────┐        SQLite (WAL)        ┌──────────────────────────┐
-│     Streamlit UI         │ ◄─── jobs / results ────► │     Agent Service         │
-│   src/ui/app.py          │        reasoning_log       │  src/agent/agent_service  │
-│                          │                            │                           │
-│  • File upload            │                            │  • Claims PENDING jobs    │
-│  • Job enqueue            │                            │  • Profiles CSV           │
-│  • Polling / log display  │                            │  • Runs reasoning loop    │
-│  • Chart / report render  │                            │  • Generates report       │
-│  • Follow-up Q&A          │                            │  • Writes results         │
+┌─────────────────────────┐      SQLite (WAL)          ┌──────────────────────────┐
+│     Streamlit UI        │ ◄─── jobs / results ────►  |     Agent Service        │
+│   src/ui/app.py         │      reasoning_log         │  src/agent/agent_service │
+│                         │                            │                          │
+│  • File upload          │                            │  • Claims PENDING jobs   │
+│  • Job enqueue          │                            │  • Profiles CSV          │
+│  • Polling / log display│                            │  • Runs reasoning loop   │
+│  • Chart / report render│                            │  • Generates report      │
+│  • Follow-up Q&A        │                            │  • Writes results        │
 └─────────────────────────┘                            └──────────────────────────┘
                                                                   │
-                                                     ┌────────────┴────────────┐
-                                                     │   Subprocess Sandbox     │
-                                                     │  subprocess_runner.py    │
-                                                     │                          │
-                                                     │  • LLM-generated code    │
-                                                     │    runs in child process  │
-                                                     │  • Output isolated to     │
-                                                     │    outputs/{session_id}/ │
-                                                     │  • Killed on timeout      │
-                                                     └──────────────────────────┘
+                                                      ┌────────────┴─────────────┐
+                                                      │   Subprocess Sandbox     │
+                                                      │  subprocess_runner.py    │
+                                                      │                          │
+                                                      │  • LLM-generated code    │
+                                                      │    runs in child process │
+                                                      │  • Output isolated to    │
+                                                      │    outputs/{session_id}/ │
+                                                      │  • Killed on timeout     │
+                                                      └──────────────────────────┘
 ```
 
 **Reasoning loop** (PLAN → ACTION → OBSERVE) runs inside the Agent Service:
