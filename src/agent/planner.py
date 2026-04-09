@@ -174,10 +174,11 @@ def call_planner_llm(
     response = client.chat.completions.create(
         model=model,
         messages=messages,
+        response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content or ""
 
-    # Strip markdown fences if the model wraps its JSON despite the instruction
+    # Strip markdown fences in case the model wraps despite json_object mode
     content = content.strip()
     if content.startswith("```"):
         content = content.split("```")[1]
