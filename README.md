@@ -21,7 +21,7 @@ The system runs as **two independent OS processes** that communicate exclusively
 │  • Chart / report render│                            │  • Generates report      │
 │  • Follow-up Q&A        │                            │  • Writes results        │
 └─────────────────────────┘                            └──────────────────────────┘
-                                                                  │
+                                                                   │
                                                       ┌────────────┴─────────────┐
                                                       │   Subprocess Sandbox     │
                                                       │  subprocess_runner.py    │
